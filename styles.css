@@ -553,3 +553,20 @@ a.btn { text-decoration: none; }
 .g-cal { display: inline-flex; margin-left: 6px; color: var(--accent); vertical-align: -2px; }
 .g-cal svg { width: 14px; height: 14px; }
 .panel > .seg { align-self: flex-start; }
+
+/* Santos (violeta) */
+.ev.cd-santo { border-color: rgba(183, 156, 240, 0.35); cursor: pointer; }
+.ev-badge.santo { background: rgba(183, 156, 240, 0.16); color: #B79CF0; }
+.ev-badge.santo svg { stroke: #B79CF0; }
+.ev-badge.santo.off { background: transparent; box-shadow: inset 0 0 0 1px var(--line2); }
+.ev-badge.santo.off svg { stroke: var(--muted); }
+.ev.today.cd-santo { border-color: color-mix(in srgb, var(--accent) 60%, transparent); }
+.pick.santo-row { grid-template-columns: 36px minmax(0, 1fr) auto auto; cursor: default; }
+.pick.santo-row.on { border-color: rgba(183, 156, 240, 0.4); }
+.date-parts.two { grid-template-columns: 70px minmax(0, 1fr); }
+.santo-sug { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+@media (max-width: 560px) {
+  .pick.santo-row { grid-template-columns: 36px minmax(0, 1fr) auto; }
+  .pick.santo-row > .btn:last-child { grid-column: 2 / -1; justify-self: start; }
+  .date-parts.two { grid-template-columns: 58px minmax(0, 1fr); }
+}
