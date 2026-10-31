@@ -512,21 +512,18 @@ a.btn { text-decoration: none; }
 .pl-labels { max-height: 55vh; overflow-y: auto; }
 
 /* Ventanas bajas: barra lateral compacta para que no necesite desplazamiento */
-@media (max-height: 870px) {
-  .sidebar { gap: 14px; padding-top: calc(14px + env(safe-area-inset-top)); }
-  .brand-mark { width: 64px; height: 64px; border-radius: 16px; }
-  .brand { gap: 5px; }
-  .brand-name { font-size: 12.5px; }
-  .brand-mark svg { width: 56px; height: 56px; }
-  .nav { gap: 2px; }
-  .nav-item { padding: 7px 4px 6px; gap: 3px; }
-  .nav-tools { padding-top: 10px; }
+/* Menos alto: primero se juntan las opciones y el logo se queda grande; por debajo de 720 px, todo más apretado */
+@media (max-height: 900px) {
+  .sidebar { gap: 12px; padding-top: calc(16px + env(safe-area-inset-top)); }
+  .nav { gap: 1px; }
+  .nav-item { padding: 6px 4px 5px; gap: 3px; }
+  .nav-tools { padding-top: 8px; }
 }
 /* Pantallas bajas (600-720 px): un poco más apretado para que el menú quepa sin desplazamiento */
 @media (max-height: 720px) {
   .sidebar { gap: 8px; padding-top: calc(8px + env(safe-area-inset-top)); }
-  .brand-mark { width: 50px; height: 50px; border-radius: 13px; }
-  .brand-mark svg { width: 43px; height: 43px; }
+  .brand-mark { width: 64px; height: 64px; border-radius: 16px; }
+  .brand-mark svg { width: 56px; height: 56px; }
   .brand { gap: 4px; }
   .brand-name { font-size: 11.5px; }
   .nav-item { padding: 4px 4px 3px; gap: 2px; }
