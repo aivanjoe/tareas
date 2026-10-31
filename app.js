@@ -1809,6 +1809,10 @@
         h('p', { class: 'muted' }, 'Token: ' + masked),
         h('div', { class: 'row-actions' },
           h('button', { type: 'button', class: 'btn ghost small', onclick: () => { close(); openSetup(); } }, 'Cambiar token'))),
+      h('div', { class: 'modal-section' },
+        h('h3', null, 'Etiquetas de tareas'),
+        h('p', { class: 'muted' }, 'Crea, renombra, ordena y elige el color de las etiquetas que arrastras a las tareas.'),
+        h('div', { class: 'row-actions' }, h('button', { type: 'button', class: 'btn ghost small', onclick: () => { close(); openTagManager(); } }, 'Gestionar etiquetas'))),
       odSection(),
       ggSection(),
       h('div', { class: 'modal-section' },
@@ -1842,7 +1846,7 @@
   // Pantallas propias: sección en index.html (#view<Nombre>), función que la pinta y acción del botón principal
   const VIEWS = {
     personal: { title: 'Personal', add: 'Añadir tarea' },
-    contactos: { title: 'Contactos', eyebrow: 'Agenda y cumpledías', add: () => ctTab() === 'agenda' ? 'Nuevo contacto' : 'Elegir contactos', el: 'viewContactos', render: () => renderCumpledias(), onAdd: () => ctTab() === 'agenda' ? openEditContacto(null) : openCdPicker() },
+    contactos: { title: 'Contactos', eyebrow: 'Agenda y cumples', add: () => ctTab() === 'agenda' ? 'Nuevo contacto' : 'Elegir contactos', el: 'viewContactos', render: () => renderCumpledias(), onAdd: () => ctTab() === 'agenda' ? openEditContacto(null) : openCdPicker() },
     gastos: { title: 'Gastos', eyebrow: 'Pagos recurrentes', add: 'Nuevo gasto', el: 'viewGastos', render: () => renderGastos(), onAdd: () => openGasto(null) },
     consumos: { title: 'Consumos', eyebrow: 'Luz, gas y agua', add: 'Subir facturas', el: 'viewConsumos', render: () => renderConsumos(), onAdd: () => pickFacturas() }
   };
@@ -1926,11 +1930,52 @@
   const contactos = () => Object.values(S.datos.colecciones.contactos || {});
   const ctTab = () => S.ui.ctTab || (contactos().length ? 'agenda' : 'cumpledias');
   const normName = s => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/\s+/g, ' ').trim();
-  // Color estable para cada categoría de Google (no se guarda: sale del nombre)
+  // Color de cada categoría de Google: el elegido por el usuario (colección "coloresContactos",
+  // {id: resourceName del grupo, color}) o, si no hay, uno estable sacado del nombre
   function catColorC(name) {
+    const rn = Object.entries(grupoMap()).find(([, n]) => n === name);
+    const elegido = rn && ((S.datos.colecciones.coloresContactos || {})[rn[0]] || {}).color;
+    if (isHex(elegido)) return elegido;
     let hsh = 0;
     for (const ch of String(name)) hsh = (hsh * 31 + ch.codePointAt(0)) >>> 0;
     return PALETTE[hsh % PALETTE.length];
+  }
+
+  function openCatColors() {
+    const grupos = Object.entries(grupoMap()).sort((a, b) => a[1].localeCompare(b[1], 'es'));
+    if (!grupos.length) { toast('No hay categorías en tus contactos.', 'error'); return; }
+    const list = h('div', { class: 'cat-colors' });
+    let open = null;
+    const draw = () => list.replaceChildren(...grupos.map(([rn, name]) => {
+      const color = catColorC(name);
+      const row = h('div', { class: 'tm-row' },
+        h('div', { class: 'tm-main' },
+          h('button', { type: 'button', class: 'swatch', style: '--c:' + color, 'aria-label': 'Cambiar color de ' + name, onclick: () => { open = open === rn ? null : rn; draw(); } }),
+          h('span', { class: 'cat-name' }, name)),
+        open === rn ? colorPicker(color, c => {
+          S.datos.colecciones.coloresContactos = Object.assign({}, S.datos.colecciones.coloresContactos, { [rn]: { id: rn, color: c } });
+          saveDatos();
+          open = null;
+          draw();
+        }) : null);
+      return row;
+    }));
+    draw();
+    openModal('Colores de las categorías', h('div', { class: 'form' },
+      h('p', { class: 'hint' }, 'Solo cambia cómo se ven en la app; en Google las categorías no tienen color.'), list),
+      { onClose: () => { if (S.ui.view === 'contactos') renderCumpledias(); } });
+  }
+
+  // Paleta de colores con opción de color libre
+  function colorPicker(current, onPick) {
+    const box = h('div', { class: 'palette' });
+    for (const c of PALETTE) {
+      box.append(h('button', { type: 'button', class: c.toLowerCase() === String(current).toLowerCase() ? 'sel' : '', style: '--c:' + c, 'aria-label': 'Color ' + c, onclick: () => onPick(c) }));
+    }
+    const custom = h('input', { type: 'color', value: isHex(current) ? current : PALETTE[0], 'aria-label': 'Color personalizado' });
+    custom.addEventListener('change', () => { if (isHex(custom.value)) onPick(custom.value); });
+    box.append(h('label', null, 'Otro', custom));
+    return box;
   }
   // Contactos marcados para Cumpledías: colección "cumpledias" ({id: id del contacto})
   const cdMarked = id => !!(S.datos.colecciones.cumpledias || {})[id];
@@ -1969,8 +2014,8 @@
     };
     search.addEventListener('input', () => { q = search.value; draw(); });
     draw();
-    openModal('Contactos en Cumpledías', h('div', { class: 'form' },
-      h('p', { class: 'hint' }, 'Marca los contactos cuyos cumpleaños y días de vida quieres seguir. Solo aparecen los que tienen cumpleaños en Google.'),
+    openModal('Contactos en Cumples', h('div', { class: 'form' },
+      h('p', { class: 'hint' }, 'Marca los contactos cuyos cumpleaños y días de vida quieres seguir. Solo aparecen los que tienen cumpleaños en Google. También puedes marcarlos con el pastel de la Agenda.'),
       search, list), { onClose: () => renderCumpledias() });
     setTimeout(() => search.focus(), 50);
   }
@@ -1988,7 +2033,7 @@
     root.dataset.day = String(today);
     const tab = ctTab();
     const tabs = h('div', { class: 'seg', role: 'group', 'aria-label': 'Vista' },
-      [['agenda', 'Agenda'], ['cumpledias', 'Cumpledías']].map(([k, label]) =>
+      [['agenda', 'Agenda'], ['cumpledias', 'Cumples']].map(([k, label]) =>
         h('button', { type: 'button', class: tab === k ? 'on' : '', 'aria-pressed': tab === k ? 'true' : 'false', onclick: () => { S.ui.ctTab = k; saveUi(); applyView(); } }, label)));
     const head = h('div', { class: 'g-toolbar' }, tabs);
     root.replaceChildren(head, ...(tab === 'agenda' ? agendaNodes() : cumpleNodes(today)));
@@ -2006,7 +2051,7 @@
           : h('button', { type: 'button', class: 'btn ghost small', onclick: openSettings }, 'Ir a Ajustes')))];
     }
     const cats = [...new Set(all.flatMap(c => c.etiquetas || []))].sort((a, b) => a.localeCompare(b, 'es'));
-    if (agCat && agCat !== '★' && !cats.includes(agCat)) agCat = null;
+    if (agCat && agCat !== '★' && agCat !== 'cumples' && !cats.includes(agCat)) agCat = null;
     const search = h('input', { class: 'input search', type: 'search', placeholder: 'Buscar por nombre, teléfono o correo', value: agQuery, 'aria-label': 'Buscar contactos', autocomplete: 'off' });
     const chip = (key, label, color) => h('button', {
       type: 'button', class: 'chip' + (agCat === key ? ' on' : ''), style: '--c:' + color, 'aria-pressed': agCat === key ? 'true' : 'false',
@@ -2015,12 +2060,14 @@
     const chips = h('div', { class: 'chips' },
       chip(null, 'Todos', '#C9D0DC'),
       all.some(c => c.favorito) ? chip('★', 'Favoritos', '#DBF266') : null,
-      cats.map(c => chip(c, c, catColorC(c))));
+      all.some(c => cdMarked(c.id)) ? chip('cumples', 'En Cumples', '#E68AC4') : null,
+      cats.map(c => chip(c, c, catColorC(c))),
+      cats.length ? h('button', { type: 'button', class: 'btn subtle small', onclick: openCatColors, title: 'Elegir los colores de las categorías' }, 'Colores') : null);
     const count = h('span', { class: 'panel-total' });
     const list = h('div', { class: 'ev-list' });
     const draw = () => {
       const q = normName(agQuery), qd = agQuery.replace(/\D/g, '');
-      const shown = all.filter(c => (agCat === null || (agCat === '★' ? c.favorito : (c.etiquetas || []).includes(agCat))) &&
+      const shown = all.filter(c => (agCat === null || (agCat === '★' ? c.favorito : agCat === 'cumples' ? cdMarked(c.id) : (c.etiquetas || []).includes(agCat))) &&
         (!q || normName(c.nombre).includes(q) || (c.emails || []).some(e => normName(e.valor).includes(q)) || (qd.length >= 3 && (c.telefonos || []).some(t => t.valor.replace(/\D/g, '').includes(qd)))));
       count.textContent = shown.length + (shown.length === 1 ? ' contacto' : ' contactos');
       list.replaceChildren(...shown.slice(0, 400).map(contactRow));
@@ -2033,19 +2080,37 @@
       h('div', { class: 'panel-head' }, search, count, refresh), chips, list)];
   }
 
+  // Fila de la Agenda: pulsar abre la ficha; el pastel marca o desmarca para Cumples sin abrirla
   function contactRow(c) {
-    // (marca de Cumpledías junto al nombre)
     const color = (c.etiquetas || []).length ? catColorC(c.etiquetas[0]) : '#9AA4B5';
     const ini = c.nombre.split(/\s+/).filter(Boolean).slice(0, 2).map(w => w[0]).join('').toUpperCase();
     const sub = [];
     if ((c.telefonos || [])[0]) sub.push(c.telefonos[0].valor);
     if ((c.emails || [])[0]) sub.push(c.emails[0].valor);
-    return h('button', { type: 'button', class: 'ev contact', onclick: () => openContacto(c.id) },
+    const cake = h('button', { type: 'button', class: 'icon-btn mini cake-toggle' });
+    const paint = () => {
+      const on = cdMarked(c.id);
+      cake.classList.toggle('on', on);
+      cake.setAttribute('aria-pressed', on ? 'true' : 'false');
+      cake.setAttribute('aria-label', on ? 'Quitar de Cumples' : 'Seguir en Cumples');
+      cake.title = on ? 'En Cumples (pulsa para quitar)' : c.cumple ? 'Seguir en Cumples' : 'Sin cumpleaños: añádeselo con Editar';
+    };
+    cake.append(ICON.cake());
+    cake.addEventListener('click', e => {
+      e.stopPropagation();
+      const on = !cdMarked(c.id);
+      setCdMark(c.id, on);
+      paint();
+      if (on && !c.cumple) toast('Sin cumpleaños no saldrá en Cumples: añádeselo con Editar.', 'error');
+    });
+    paint();
+    return h('div', { class: 'ev contact', onclick: () => openContacto(c.id) },
       h('span', { class: 'avatar', style: '--c:' + color }, ini || '·'),
-      h('span', { class: 'ev-main' },
-        h('span', { class: 'ev-name' }, c.nombre, c.favorito ? h('span', { class: 'star', title: 'Favorito' }, ' ★') : null, cdMarked(c.id) ? h('span', { class: 'cd-mark', title: 'En Cumpledías' }, ICON.cake()) : null),
+      h('button', { type: 'button', class: 'ev-main as-btn' },
+        h('span', { class: 'ev-name' }, c.nombre, c.favorito ? h('span', { class: 'star', title: 'Favorito' }, ' ★') : null),
         h('span', { class: 'ev-what' }, sub.join(' · ') || 'Sin teléfono ni correo')),
-      h('span', { class: 'cat-dots' }, (c.etiquetas || []).slice(0, 4).map(e => h('span', { class: 'cat-dot', style: '--c:' + catColorC(e), title: e }))));
+      h('span', { class: 'cat-dots' }, (c.etiquetas || []).slice(0, 4).map(e => h('span', { class: 'cat-dot', style: '--c:' + catColorC(e), title: e }))),
+      cake);
   }
 
   // Ficha de contacto (solo lectura; se edita en Google Contactos)
@@ -2071,11 +2136,11 @@
     if (c.notas) sect('Notas', [h('div', { class: 'note-text' }, c.notas)]);
     const gid = String(c.resourceName || '').replace(/^people\//, '');
     const mark = h('input', { type: 'checkbox', id: 'ctCd', checked: cdMarked(c.id) });
-    mark.addEventListener('change', () => { setCdMark(c.id, mark.checked); if (mark.checked && !c.cumple) toast('Sin cumpleaños no saldrá en Cumpledías: añádeselo con Editar.', 'error'); });
+    mark.addEventListener('change', () => { setCdMark(c.id, mark.checked); if (mark.checked && !c.cumple) toast('Sin cumpleaños no saldrá en Cumples: añádeselo con Editar.', 'error'); });
     let close = null;
     const body = h('div', { class: 'form' }, ...rows,
       rows.length ? null : h('p', { class: 'muted' }, 'Este contacto no tiene más datos.'),
-      h('label', { class: 'check-line', for: 'ctCd' }, mark, 'Seguir en Cumpledías'),
+      h('label', { class: 'check-line', for: 'ctCd' }, mark, 'Seguir en Cumples'),
       h('div', { class: 'row-actions modal-foot' },
         h('a', { class: 'btn subtle small', href: 'https://contacts.google.com/person/' + encodeURIComponent(gid), target: '_blank', rel: 'noopener noreferrer' }, 'Abrir en Google'),
         h('span', { class: 'spacer' }),
@@ -2259,15 +2324,17 @@
       stat('Personas', String(people.length), people.length === 1 ? 'en la lista' : 'en la lista'));
 
     const filters = h('div', { class: 'seg', role: 'group', 'aria-label': 'Filtrar' },
-      [['todo', 'Todo'], ['dias', 'Días de vida'], ['cumple', 'Cumpleaños']].map(([k, label]) =>
+      [['todo', 'Todo'], ['cumple', 'Cumpleaños'], ['dias', 'Días de vida']].map(([k, label]) =>
         h('button', { type: 'button', class: cdFilter === k ? 'on' : '', 'aria-pressed': cdFilter === k ? 'true' : 'false', onclick: () => { cdFilter = k; renderCumpledias(); } }, label)));
 
     const list = h('div', { class: 'ev-list' });
     for (const e of events.slice(0, 20)) {
+      const redondo = e.kind === 'dias' && e.value % 5000 === 0;
       const badge = e.kind === 'dias' ? fmtNum(e.value / 1000) + 'k' : e.value === null ? '' : String(e.value);
       const what = e.kind === 'dias' ? 'Cumple ' + fmtNum(e.value) + ' días de vida' : e.value === null ? 'Cumpleaños' : 'Cumple ' + e.value + (e.value === 1 ? ' año' : ' años');
-      list.append(h('div', { class: 'ev' + (e.until === 0 ? ' today' : '') },
-        h('span', { class: 'ev-badge ' + e.kind, title: e.kind === 'dias' ? 'Cumpledías' : 'Cumpleaños' }, badge || ICON.cake()),
+      const kind = e.kind === 'cumple' ? 'cumple' : redondo ? 'redondo' : 'dias';
+      list.append(h('div', { class: 'ev cd-' + kind + (e.until === 0 ? ' today' : '') },
+        h('span', { class: 'ev-badge ' + kind, title: kind === 'cumple' ? 'Cumpleaños' : kind === 'redondo' ? 'Cumpledías redondo (múltiplo de 5.000)' : 'Cumpledías' }, badge || ICON.cake()),
         h('div', { class: 'ev-main' }, h('span', { class: 'ev-name' }, e.p.name), h('span', { class: 'ev-what' }, what)),
         h('div', { class: 'ev-when' },
           h('span', { class: 'ev-date' }, fmtDay(e.date)),
@@ -2289,6 +2356,10 @@
       h('div', { class: 'cd-grid' },
         h('section', { class: 'panel' },
           h('div', { class: 'panel-head' }, h('h2', null, 'Próximos'), filters),
+          h('div', { class: 'legend cd-legend' },
+            h('span', { class: 'lg', style: '--c:#E68AC4' }, 'Cumpleaños'),
+            h('span', { class: 'lg', style: '--c:#F2B35B' }, 'Cada 5.000 días'),
+            h('span', { class: 'lg', style: '--c:#7FA2E0' }, 'Cada 1.000 días')),
           list),
         h('section', { class: 'panel' },
           h('div', { class: 'panel-head' }, h('h2', null, 'Personas'),
@@ -3208,7 +3279,6 @@
       e.preventDefault();
       showView(a.dataset.view);
     }));
-    document.getElementById('openTags').addEventListener('click', () => { if (SMALL.matches) toggleSidebar(false); openTagManager(); });
     document.getElementById('openSettings').addEventListener('click', () => { if (SMALL.matches) toggleSidebar(false); openSettings(); });
     document.getElementById('projectSelect').addEventListener('change', e => {
       S.ui.projectId = e.target.value;
