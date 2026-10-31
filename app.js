@@ -556,7 +556,8 @@
   }
 
   async function runCommands(commands) {
-    const desc = commands.map(describeCmd);
+    const todos = commands.map(describeCmd);
+    const desc = todos.length > 1 && todos.some(d => d !== 'Tareas reordenadas') ? todos.filter(d => d !== 'Tareas reordenadas') : todos;
     const resumen = desc.length === 1 ? desc[0] : desc.every(d => d === desc[0]) ? desc[0] : plural(desc.length, 'cambio') + ' en Todoist';
     let r;
     try { r = await apiCall({ commands: JSON.stringify(commands) }); }
@@ -1172,17 +1173,17 @@
       } catch (e) { await plRecover(e); }
       return;
     }
-    // Nueva tarea, al final de la columna
+    // Nueva tarea, arriba del todo de la columna (decisión del usuario): orderHint " <primera>!"
     const col = plColumns().find(c => c.key === ed.sectionKey) || plColumns()[0];
     if (!col) return;
-    const last = col.items[col.items.length - 1];
-    const tmp = { id: 'tmp-' + uid(), title: name, bucketId: col.key, planId: S.pl.planId, orderHint: (last ? last.orderHint : '') + '~', cats: tagIds.slice(), hasDescription: false, etag: null };
+    const first = col.items.find(t => !String(t.id).startsWith('tmp-'));
+    const tmp = { id: 'tmp-' + uid(), title: name, bucketId: col.key, planId: S.pl.planId, orderHint: '', cats: tagIds.slice(), hasDescription: false, etag: null };
     S.pl.tasks.push(tmp);
     renderBoard();
     const applied = {};
     for (const k of tagIds) applied[k] = true;
     try {
-      const created = await plCall('POST', '/planner/tasks', { planId: S.pl.planId, bucketId: col.key, title: name, orderHint: (last ? last.orderHint : '') + ' !', appliedCategories: applied });
+      const created = await plCall('POST', '/planner/tasks', { planId: S.pl.planId, bucketId: col.key, title: name, orderHint: ' ' + (first ? first.orderHint : '') + '!', appliedCategories: applied });
       S.pl.tasks = S.pl.tasks.filter(x => x.id !== tmp.id);
       plReplace(plTaskFrom(created));
       renderBoard();
@@ -2329,11 +2330,10 @@
     const pid = currentProjectId();
     const tempId = 'tmp-' + uid();
     const sectionId = ed.sectionKey === 'none' ? null : ed.sectionKey;
-    const siblings = S.data.items.filter(i => i.project_id === pid && (i.section_id || null) === sectionId && !i.parent_id);
-    const item = {
-      id: tempId, content: name, project_id: pid, section_id: sectionId, parent_id: null,
-      child_order: siblings.reduce((m, i) => Math.max(m, i.child_order), 0) + 1, recurring: false
-    };
+    // Las tareas nuevas van arriba del todo de su sección (decisión del usuario)
+    const siblings = S.data.items.filter(i => i.project_id === pid && (i.section_id || null) === sectionId && !i.parent_id).sort((a, b) => a.child_order - b.child_order);
+    const item = { id: tempId, content: name, project_id: pid, section_id: sectionId, parent_id: null, child_order: 1, recurring: false };
+    siblings.forEach((i, k) => { i.child_order = k + 2; });
     S.data.items.push(item);
     S.tags.assign[tempId] = tagIds;
     renderBoard();
@@ -2342,7 +2342,9 @@
     const args = { content: name, project_id: pid };
     if (sectionId) args.section_id = sectionId;
     try {
-      const map = await runCommands([{ type: 'item_add', temp_id: tempId, uuid: uid(), args }]);
+      // En el mismo envío: crear y ponerla la primera (el temp_id vale para el reorder)
+      const orden = [{ id: tempId, child_order: 1 }].concat(siblings.filter(i => !String(i.id).startsWith('tmp-')).map(i => ({ id: i.id, child_order: i.child_order })));
+      const map = await runCommands([{ type: 'item_add', temp_id: tempId, uuid: uid(), args }, { type: 'item_reorder', uuid: uid(), args: { items: orden } }]);
       const realId = map[tempId];
       if (!realId) throw new ApiError('command', 'Todoist no devolvió el identificador de la tarea.');
       item.id = realId;
