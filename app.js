@@ -589,7 +589,8 @@
       columnField = h('div', { class: 'field' }, h('label', { class: 'field-label', for: 'taskColumn' }, 'Columna'), sel);
     }
 
-    drawer.append(
+    // drawer.append no ignora null (lo pinta como texto), así que se filtran los huecos
+    drawer.append(...[
       h('div', { class: 'drawer-head' },
         h('div', null,
           h('h2', null, ed.mode === 'new' ? 'Nueva tarea' : 'Editar tarea'),
@@ -610,7 +611,7 @@
         h('span', { class: 'spacer' }),
         h('button', { type: 'button', class: 'btn subtle small', onclick: closeDrawer }, 'Cancelar'),
         h('button', { type: 'button', class: 'btn primary small', onclick: saveDrawer }, ed.mode === 'new' ? 'Crear tarea' : 'Guardar'))
-    );
+    ].filter(Boolean));
 
     drawer.hidden = false;
     document.getElementById('drawerScrim').hidden = false;
