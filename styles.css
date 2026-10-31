@@ -429,6 +429,25 @@ body.tag-dragging, body.tag-dragging * { cursor: grabbing !important; }
 .chip.static { cursor: default; }
 a.btn { text-decoration: none; }
 
+/* Edición de contactos */
+.rows-edit { display: flex; flex-direction: column; gap: 6px; }
+.row-edit { display: grid; grid-template-columns: minmax(0, 1fr) 120px 26px; gap: 6px; align-items: center; }
+.row-edit.two { grid-template-columns: minmax(0, 1fr) auto; }
+.add-row { align-self: flex-start; padding: 0 8px; }
+.date-parts { display: grid; grid-template-columns: 70px minmax(0, 1fr) 130px; gap: 6px; }
+.cd-mark { display: inline-flex; margin-left: 6px; color: var(--accent); vertical-align: -2px; }
+.cd-mark svg { width: 14px; height: 14px; }
+.pick-list { display: flex; flex-direction: column; gap: 6px; max-height: 50vh; overflow-y: auto; }
+.pick { display: grid; grid-template-columns: 22px minmax(0, 1fr); gap: 10px; align-items: center; padding: 9px 12px; border-radius: 10px; border: 1px solid var(--line); background: var(--card); text-align: left; font: inherit; color: inherit; cursor: pointer; }
+.pick.on { border-color: rgba(219, 242, 102, 0.45); }
+.pick-box { width: 20px; height: 20px; border-radius: 6px; border: 1.5px solid var(--line2); display: grid; place-items: center; color: var(--bg); }
+.pick.on .pick-box { background: var(--accent); border-color: var(--accent); }
+.pick-box svg { width: 14px; height: 14px; stroke-width: 2.6; }
+@media (max-width: 700px) {
+  .row-edit { grid-template-columns: minmax(0, 1fr) 112px 26px; }
+  .date-parts { grid-template-columns: 58px minmax(0, 1fr) 76px; }
+}
+
 /* Resumen de gastos */
 .cat-list { display: flex; flex-direction: column; gap: 8px; }
 .cat-row { display: grid; grid-template-columns: 10px minmax(90px, 160px) minmax(0, 1fr) 44px auto; align-items: center; gap: 10px; }
