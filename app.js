@@ -22,6 +22,23 @@
     setTimeout(reset, 300);
   }
 
+  // La página no se desplaza nunca: cada pantalla se desplaza por dentro. Si el navegador del móvil la
+  // deja movida (al recargar, al cerrar el teclado o al esconder la barra de direcciones), la cabecera
+  // queda fuera de la pantalla y no hay forma de volver a ella: se devuelve arriba. Mientras se escribe
+  // en un campo no se toca, porque el navegador la mueve para que el campo quede a la vista del teclado.
+  if ('scrollRestoration' in history) history.scrollRestoration = 'manual';
+  const escribiendo = () => { const a = document.activeElement; return !!a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName); };
+  const alInicio = () => {
+    if (escribiendo()) return;
+    const de = document.documentElement, b = document.body;
+    if (window.scrollY || window.scrollX || de.scrollTop || (b && b.scrollTop)) { window.scrollTo(0, 0); de.scrollTop = 0; if (b) b.scrollTop = 0; }
+  };
+  window.addEventListener('scroll', alInicio, { passive: true });
+  window.addEventListener('pageshow', () => setTimeout(alInicio, 60));
+  window.addEventListener('resize', () => setTimeout(alInicio, 60));
+  document.addEventListener('focusout', () => setTimeout(alInicio, 150));
+  if (window.visualViewport) window.visualViewport.addEventListener('resize', () => setTimeout(alInicio, 60));
+
   const API_URL = 'https://api.todoist.com/api/v1/sync';
   const KEYS = {
     token: 'mp.todoist.token',
