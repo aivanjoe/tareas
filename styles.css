@@ -53,7 +53,8 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
 }
 .app.sb-hidden .sidebar { margin-left: -140px; }
 
-.brand { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+/* Marco lima de esquinas redondeadas que abarca el logo y el nombre (elegido por el usuario) */
+.brand { display: flex; flex-direction: column; align-items: center; gap: 8px; align-self: center; width: max-content; padding: 8px 8px 6px; border: 1.5px solid var(--accent); border-radius: 26px; }
 .brand-name { font-size: 15px; font-weight: 800; letter-spacing: 0.22em; text-transform: uppercase; color: var(--accent); padding-left: 0.22em; }
 .brand-mark { width: 88px; height: 88px; border-radius: 20px; flex: 0 0 auto; background: var(--accent); color: var(--bg); display: grid; place-items: center; }
 .brand-mark svg { width: 78px; height: 78px; stroke-width: 2.6; }
@@ -524,7 +525,7 @@ a.btn { text-decoration: none; }
   .sidebar { gap: 8px; padding-top: calc(8px + env(safe-area-inset-top)); }
   .brand-mark { width: 64px; height: 64px; border-radius: 16px; }
   .brand-mark svg { width: 56px; height: 56px; }
-  .brand { gap: 4px; }
+  .brand { gap: 4px; padding: 6px 6px 4px; border-radius: 21px; }
   .brand-name { font-size: 11.5px; }
   .nav-item { padding: 4px 4px 3px; gap: 2px; }
   .nav-tools { padding-top: 6px; }
