@@ -21,7 +21,7 @@
 }
 
 * { box-sizing: border-box; }
-html, body { margin: 0; height: 100%; }
+html, body { margin: 0; height: 100%; -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
 body {
   background: var(--bg);
   color: var(--text);
@@ -405,6 +405,12 @@ body.tag-dragging, body.tag-dragging * { cursor: grabbing !important; }
   .form-row { grid-template-columns: minmax(0, 1fr); }
   .months { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 }
+
+/* En pantallas táctiles, campos a 16 px: con menos, Safari amplía la página al escribir y no la devuelve a su tamaño */
+@media (pointer: coarse), (max-width: 700px) {
+  .input, .select, textarea, input[type="text"], input[type="date"], input[type="number"], select { font-size: 16px; }
+}
+.estimate .stat-sub { white-space: normal; }
 
 /* ===== Consumos ===== */
 .stat.pick { text-align: left; cursor: pointer; font: inherit; color: inherit; transition: border-color 0.12s, background 0.12s; }

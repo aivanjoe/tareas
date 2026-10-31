@@ -1980,7 +1980,22 @@
     const importe = h('input', { class: 'input', id: 'pgImporte', type: 'text', inputmode: 'decimal', autocomplete: 'off', value: fmtNumInput(g0().importe) });
     const fecha = h('input', { class: 'input', id: 'pgFecha', type: 'date', value: todayYmd() });
     const notas = h('input', { class: 'input', id: 'pgNotas', type: 'text', maxlength: '200', placeholder: 'Opcional', autocomplete: 'off' });
-    sel.addEventListener('change', () => { importe.value = fmtNumInput(g0().importe); });
+    // Si el importe no es el del gasto: ¿solo esta vez o es el importe nuevo a partir de ahora?
+    let alcance = 'temporal';
+    const alcanceSeg = h('div', { class: 'seg' });
+    const drawAlcance = () => alcanceSeg.replaceChildren(...[['temporal', 'Solo este pago'], ['fijo', 'Nuevo importe fijo']].map(([k, v]) =>
+      h('button', { type: 'button', class: alcance === k ? 'on' : '', 'aria-pressed': alcance === k ? 'true' : 'false', onclick: () => { alcance = k; drawAlcance(); } }, v)));
+    drawAlcance();
+    const alcanceHint = h('p', { class: 'hint' });
+    const alcanceBox = h('div', { class: 'field', hidden: true }, h('span', { class: 'field-label' }, 'Este importe es distinto del habitual'), alcanceSeg, alcanceHint);
+    const checkImporte = () => {
+      const g = g0(), imp = parseAmount(importe.value);
+      const distinto = g && imp >= 0 && Math.abs(imp - (Number(g.importe) || 0)) >= 0.005;
+      alcanceBox.hidden = !distinto;
+      if (distinto) alcanceHint.textContent = 'Importe habitual de «' + g.concepto + '»: ' + fmtEur(g.importe) + '. Con «Nuevo importe fijo» se actualiza el gasto para los próximos cobros.';
+    };
+    importe.addEventListener('input', checkImporte);
+    sel.addEventListener('change', () => { importe.value = fmtNumInput(g0().importe); alcance = 'temporal'; drawAlcance(); checkImporte(); });
     let close = null;
     const save = () => {
       const g = g0();
@@ -1988,16 +2003,20 @@
       if (!g) return;
       if (!(imp >= 0)) { toast('Pon un importe válido.', 'error'); importe.focus(); return; }
       if (!isYmd(fecha.value)) { toast('Pon una fecha válida.', 'error'); fecha.focus(); return; }
-      putRecord('pagos', { id: 'pg-' + uid(), gastoId: g.id, concepto: g.concepto, categoria: g.categoria || 'Otros', fecha: fecha.value, importe: Math.round(imp * 100) / 100, notas: notas.value.trim() });
+      const cantidad = Math.round(imp * 100) / 100;
+      putRecord('pagos', { id: 'pg-' + uid(), gastoId: g.id, concepto: g.concepto, categoria: g.categoria || 'Otros', fecha: fecha.value, importe: cantidad, notas: notas.value.trim() });
+      const fijo = !alcanceBox.hidden && alcance === 'fijo';
+      if (fijo) putRecord('gastos', Object.assign({}, g, { importe: cantidad }));
       close();
       renderGastos();
-      toast('Pago registrado: ' + g.concepto);
+      toast('Pago registrado: ' + g.concepto + (fijo ? '. Nuevo importe: ' + fmtEur(cantidad) : ''));
     };
     notas.addEventListener('keydown', e => { if (e.key === 'Enter') save(); });
     const field = (label, forId, el) => h('div', { class: 'field' }, h('label', { class: 'field-label', for: forId }, label), el);
     const body = h('div', { class: 'form' },
       field('Gasto', 'pgGasto', sel),
       h('div', { class: 'form-row' }, field('Fecha', 'pgFecha', fecha), field('Importe (€)', 'pgImporte', importe)),
+      alcanceBox,
       field('Notas', 'pgNotas', notas),
       h('div', { class: 'row-actions modal-foot' },
         h('span', { class: 'spacer' }),
@@ -2011,7 +2030,7 @@
   // en que termina el consumo (anio/mes = mes de "fin"). Los PDF van a OneDrive: facturas/AAAA/<tipo>_<fin>.pdf
   const TIPOS = {
     luz: { nombre: 'Luz', unidad: 'kWh', campo: 'kwh', color: '#F5D76E' },
-    gas: { nombre: 'Gas', unidad: 'kWh', campo: 'kwh', color: '#F2B35B' },
+    gas: { nombre: 'Gas', unidad: 'kWh', campo: 'kwh', color: '#8BD17C' },
     agua: { nombre: 'Agua', unidad: 'm³', campo: 'm3', color: '#6FC3E8' }
   };
   const MESES_LARGOS = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre'];
