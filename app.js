@@ -227,10 +227,15 @@
   const plural = (n, uno, varios) => n + ' ' + (n === 1 ? uno : (varios || uno + 's'));
   // Resultado de una sincronización ({ fuente, detalle: [...], error }). Las automáticas se registran solo
   // si traen cambios o fallan; las del botón Sincronizar las registra el botón, todas juntas.
-  function finSync(fuente, opts, detalle, error) {
+  // Una sesión caducada (kind 'login') no es un error: se anota «hay que reconectar» y, al reconectar,
+  // se registra la conexión. Las automáticas con la sesión caducada no registran nada.
+  function finSync(fuente, opts, detalle, error, kind) {
     const nombre = AUD_FUENTES[fuente][0];
-    const res = { fuente, detalle: detalle || [], error: error || null };
-    res.texto = error ? nombre + ': ' + error : nombre + ': ' + (res.detalle.length ? plural(res.detalle.length, 'cambio') : 'sin cambios');
+    const reconectar = !!error && kind === 'login';
+    const res = { fuente, detalle: detalle || [], error: error && !reconectar ? error : null, reconectar };
+    res.texto = reconectar ? nombre + ': hay que reconectar (sesión caducada)'
+      : error ? nombre + ': ' + error : nombre + ': ' + (res.detalle.length ? plural(res.detalle.length, 'cambio') : 'sin cambios');
+    if (reconectar) return res;
     if (!opts.manual && (error || res.detalle.length)) audit(fuente, error ? 'error' : 'sync', res.texto, { detalle: error ? null : res.detalle, auto: true });
     if (opts.manual && error) audit(fuente, 'error', res.texto);
     return res;
@@ -541,7 +546,7 @@
       if (!prev) res.texto = 'Todoist: ' + plural(S.data.items.length, 'tarea leída', 'tareas leídas');
       if (!opts.silent) toast('Sincronizado con Todoist');
     } catch (e) {
-      res = finSync('todoist', opts, null, e.message);
+      res = finSync('todoist', opts, null, e.message, e.kind === 'auth' ? 'login' : e.kind);
       toast(e.message, 'error');
       if (e.kind === 'auth') openSetup(e.message);
     } finally {
@@ -615,12 +620,13 @@
   }
 
   function odLoggedIn(account, notify) {
+    const antes = !!S.od.account;
     S.od.account = account.username || account.name || 'Cuenta de Microsoft';
     saveOd();
     S.odState = 'idle';
     renderSyncState();
     if (notify) toast('OneDrive conectado');
-    audit('onedrive', 'conexion', 'OneDrive conectado');
+    audit('onedrive', 'conexion', antes ? 'OneDrive reconectado' : 'OneDrive conectado');
     syncDatos();
   }
 
@@ -768,7 +774,7 @@
       try { await archivarAuditoria(token); } catch (e) { audit('onedrive', 'error', 'No se pudo archivar el historial: ' + (e.message || ''), { auto: true }); }
       if (opts.notify) toast('Datos sincronizados con OneDrive');
     } catch (e) {
-      res = finSync('onedrive', opts, null, e.message || 'Error al sincronizar con OneDrive.');
+      res = finSync('onedrive', opts, null, e.message || 'Error al sincronizar con OneDrive.', e.kind);
       S.odState = e.kind === 'login' ? 'login' : 'error';
       if (e.kind === 'login') toast(e.message, 'error', { label: 'Conectar', fn: odConnect }, 10000);
       else toast(e.message || 'Error al sincronizar con OneDrive.', 'error');
@@ -876,11 +882,12 @@
   }
 
   function plLoggedIn(account) {
+    const antes = !!S.pl.account;
     S.pl.account = account.username || account.name || 'Cuenta del trabajo';
     savePl();
     S.plState = 'idle';
     toast('Planner conectado');
-    audit('planner', 'conexion', 'Planner conectado');
+    audit('planner', 'conexion', antes ? 'Planner reconectado' : 'Planner conectado');
     plSync();
   }
 
@@ -1001,7 +1008,7 @@
       if (!prevTasks || prevPlan !== planId) res.texto = 'Planner: ' + plural(tasks.length, 'tarea leída', 'tareas leídas');
       if (opts.notify) toast('Sincronizado con Planner');
     } catch (e) {
-      res = finSync('planner', opts, null, e.message);
+      res = finSync('planner', opts, null, e.message, e.kind);
       S.plState = e.kind === 'login' ? 'login' : 'error';
       if (e.kind === 'login') toast(e.message, 'error', { label: 'Conectar', fn: plConnect }, 10000);
       else toast(e.message || 'Error al leer Planner.', 'error');
@@ -1253,20 +1260,19 @@
   }
 
   async function ggAfterLogin() {
+    audit('google', 'conexion', S.gg.account ? 'Google reconectado' : 'Google conectado');
     try {
       if (!S.gg.account) {
         const me = await ggGet('https://www.googleapis.com/oauth2/v3/userinfo');
         S.gg.account = me.email || 'Cuenta de Google';
         saveGg();
         toast('Google conectado');
-        audit('google', 'conexion', 'Google conectado');
       }
     } catch (e) { /* se reintenta al sincronizar */ }
     S.ggState = 'idle';
     let next = null;
     try { next = JSON.parse(sessionStorage.getItem(GG_NEXT) || 'null'); } catch (e) { /* nada */ }
     sessionStorage.removeItem(GG_NEXT);
-    audit('google', 'conexion', 'Permiso de Google renovado');
     await syncContactos();
     applyView();
     calSync();
@@ -1419,7 +1425,7 @@
       if (S.ui.view === 'contactos' || S.ui.view === 'calendario') applyView();
       if (opts.notify) toast(Object.keys(recs).length + ' contactos actualizados desde Google');
     } catch (e) {
-      res = finSync('contactos', opts, null, e.message);
+      res = finSync('contactos', opts, null, e.message, e.kind);
       S.ggState = e.kind === 'login' ? 'login' : 'error';
       if (e.kind === 'login') toast(e.message, 'error', { label: 'Conectar', fn: ggLogin }, 10000);
       else toast(e.message || 'Error al leer los contactos de Google.', 'error');
@@ -1665,7 +1671,7 @@
       S.calState = 'idle';
       if (opts.notify) toast('Calendario sincronizado' + (cambios ? ' (' + cambios + (cambios === 1 ? ' cambio)' : ' cambios)') : ''));
     } catch (e) {
-      res = finSync('calendario', opts, null, e.message || 'Error con Google Calendar.');
+      res = finSync('calendario', opts, null, e.message || 'Error con Google Calendar.', e.kind);
       S.calState = 'error';
       if (e.kind === 'login') { S.calState = 'idle'; toast(e.message, 'error', { label: 'Conectar', fn: ggLogin }, 10000); }
       else if (e.kind === 'scope') toast(e.message, 'error', { label: 'Dar permiso', fn: () => ggLogin(true) }, 15000);
@@ -4722,7 +4728,10 @@
       // Contactos de Google: solo si el permiso sigue vigente (no se sale de la página sin pedirlo)
       if (ggConnected() && ggTokenOk()) trabajos.push(syncContactos({ notify: v === 'contactos', manual: true }).then(async r => [r, await calSync({ notify: v === 'calendario', manual: true })]));
       // Sin permiso vigente no se sale de la página, pero se avisa de que Google se queda sin actualizar
-      else if (ggConnected()) toast('El permiso de Google ha caducado: reconecta para actualizar ' + (calReady() ? 'el calendario y los contactos.' : 'los contactos.'), 'error', { label: 'Reconectar', fn: ggLogin }, 10000);
+      else if (ggConnected()) {
+        toast('El permiso de Google ha caducado: reconecta para actualizar ' + (calReady() ? 'el calendario y los contactos.' : 'los contactos.'), 'error', { label: 'Reconectar', fn: ggLogin }, 10000);
+        trabajos.push(Promise.resolve({ fuente: 'google', detalle: [], error: null, reconectar: true, texto: 'Google: hay que reconectar (permiso caducado)' }));
+      }
       // Planner: si la sesión del trabajo caducó, este clic lleva a reconectar
       if (plConnected()) { if (S.plState === 'login') plConnect(); else trabajos.push(plSync({ notify: v === 'trabajo', manual: true })); }
       trabajos.push(doSync({ silent: v !== 'personal', manual: true }));
@@ -4730,10 +4739,11 @@
       Promise.all(trabajos.map(p => p.catch(() => null))).then(rs => {
         const res = rs.flat().filter(Boolean);
         if (!res.length) return;
-        const n = res.reduce((a, r) => a + (r.error ? 0 : r.detalle.length), 0), err = res.filter(r => r.error).length;
+        const n = res.reduce((a, r) => a + (r.error || r.reconectar ? 0 : r.detalle.length), 0), err = res.filter(r => r.error).length;
+        const rec = [...new Set(res.filter(r => r.reconectar).map(r => r.fuente === 'contactos' || r.fuente === 'calendario' ? 'Google' : AUD_FUENTES[r.fuente][0]))];
         const detalle = [];
         for (const r of res) { detalle.push(r.texto); for (const d of r.detalle.slice(0, 50)) detalle.push('· ' + d); }
-        audit('visir', err ? 'error' : 'sync', 'Sincronización manual: ' + (n ? plural(n, 'cambio') : 'sin cambios') + (err ? ' · ' + plural(err, 'fuente') + ' con error' : ''),
+        audit('visir', err ? 'error' : 'sync', 'Sincronización manual: ' + (n ? plural(n, 'cambio') : 'sin cambios') + (err ? ' · ' + plural(err, 'fuente') + ' con error' : '') + (rec.length ? ' · hay que reconectar ' + rec.join(' y ') : ''),
           { detalle, fuentes: res.map(r => r.fuente) });
       });
     });
