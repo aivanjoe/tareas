@@ -585,11 +585,14 @@
   const ggConnected = () => !!(S.gg.clientId && S.gg.account);
   const ggTokenOk = () => !!S.gg.token && Date.now() < S.gg.exp - 60000;
 
-  function ggLogin() {
+  // consent: vuelve a mostrar la pantalla de permisos (si la vez anterior no se marcó el de contactos)
+  function ggLogin(consent) {
     const state = uid();
     sessionStorage.setItem(GG_STATE, state);
     const q = new URLSearchParams({ client_id: S.gg.clientId, redirect_uri: appUrl(), response_type: 'token', scope: GG_SCOPES, include_granted_scopes: 'true', state });
-    if (S.gg.account) q.set('login_hint', S.gg.account); else q.set('prompt', 'select_account');
+    if (S.gg.account) q.set('login_hint', S.gg.account);
+    if (consent === true) q.set('prompt', S.gg.account ? 'consent' : 'consent select_account');
+    else if (!S.gg.account) q.set('prompt', 'select_account');
     location.assign('https://accounts.google.com/o/oauth2/v2/auth?' + q);
   }
 
@@ -608,7 +611,7 @@
       return;
     }
     if (!(q.get('scope') || '').includes('contacts.readonly')) {
-      toast('Para leer tus contactos hay que marcar el permiso de contactos en Google.', 'error', null, 10000);
+      toast('Google no ha dado permiso para ver tus contactos: marca la casilla «Ver tus contactos».', 'error', { label: 'Volver a pedir', fn: () => ggLogin(true) }, 15000);
       return;
     }
     S.gg.token = q.get('access_token');
