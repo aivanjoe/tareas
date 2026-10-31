@@ -54,8 +54,8 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
 .app.sb-hidden .sidebar { margin-left: -236px; }
 
 .brand { display: flex; align-items: center; gap: 10px; padding: 0 6px 0 10px; }
-.brand-mark { width: 30px; height: 30px; border-radius: 9px; background: var(--accent); color: var(--bg); display: grid; place-items: center; }
-.brand-mark svg { width: 25px; height: 25px; stroke-width: 4.5; }
+.brand-mark { width: 44px; height: 44px; border-radius: 12px; background: var(--accent); color: var(--bg); display: grid; place-items: center; }
+.brand-mark svg { width: 39px; height: 39px; stroke-width: 3.6; }
 .brand-name { flex: 1; font-weight: 800; font-size: 16px; letter-spacing: -0.01em; }
 
 .nav { display: flex; flex-direction: column; gap: 3px; }
