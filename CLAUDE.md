@@ -85,6 +85,7 @@ Oscuro y elegante. Tipografía Manrope (Google Fonts) con alternativas del siste
 - Cambios optimistas en pantalla y después la llamada a la API; si falla, avisar con `toast()` y re-sincronizar.
 - Mantener los textos de la interfaz en español y con tono directo.
 - Código legible y comentado en español solo donde aporte.
+- **Versión anti-caché:** en `index.html`, `styles.css` y `app.js` se cargan con `?v=N` (mismo número en ambos). En cada cambio que se suba, incrementar `N` en uno, aunque solo haya cambiado uno de los dos ficheros. `Sortable.min.js` no lleva versión porque no cambia.
 
 ## Forma de trabajar con el usuario
 
