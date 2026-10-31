@@ -1285,7 +1285,7 @@
     }
     // Santos elegidos del santoral de Cumples (uno por nombre, aunque lo lleven varias personas)
     for (const st of santosDeCumples().lista) {
-      if (!st.calendario) continue;
+      if (!st.calendario || !st.personas.length) continue;
       ev('santo:' + st.clave, santoTitulo(st), year + '-' + (st.fecha === '02-29' && !isLeap(year) ? '02-28' : st.fecha), {
         recurrence: [st.fecha === '02-29' ? 'RRULE:FREQ=YEARLY;BYMONTH=2;BYMONTHDAY=-1' : 'RRULE:FREQ=YEARLY'], colorId: '3',
         description: 'Lo celebran: ' + st.personas.map(shortName).join(', ') + '.\nCreado por Mi panel.'
@@ -3113,8 +3113,9 @@
     const esMaria = ['maria', 'mari', 'ma', 'm'].includes(w[0]);
     const cands = [w.join(' ')].concat(esMaria && w.length > 1 ? [w.slice(1).join(' '), w[1]] : [], [w[0]], esMaria ? ['maria'] : []);
     const guard = santosGuardados();
+    // Los añadidos a mano mandan, aparezcan donde aparezcan en el nombre ("Ana Gemma" -> Gemma)
+    for (const c of cands.concat(w)) if (guard[c] && guard[c].manual) return Object.assign({}, guard[c], { clave: c });
     for (const c of cands) {
-      if (guard[c] && guard[c].manual) return Object.assign({}, guard[c], { clave: c });
       const a = Object.prototype.hasOwnProperty.call(SANTO_ALIAS, c) ? SANTO_ALIAS[c] : c;
       if (SANTO_IDX[a]) return SANTO_IDX[a];
     }
@@ -3135,6 +3136,11 @@
           fechaSantoral: base.manual ? null : (SANTO_IDX[base.clave] || {}).fecha || null, personas: [] };
       }
       by[base.clave].personas.push(c);
+    }
+    // Los añadidos a mano salen siempre, aunque nadie de Cumples se llame así (para verlos y poder borrarlos)
+    for (const g of Object.values(santosGuardados())) {
+      if (!g.manual || by[g.id] || !/^\d{2}-\d{2}$/.test(g.fecha || '')) continue;
+      by[g.id] = { clave: g.id, nombre: g.nombre, fecha: g.fecha, genero: g.genero || 'm', calendario: !!g.calendario, manual: true, cambiado: false, fechaSantoral: null, personas: [] };
     }
     const lista = Object.values(by).sort((a, b) => a.fecha.localeCompare(b.fecha) || a.nombre.localeCompare(b.nombre, 'es'));
     return { lista, sinSanto };
@@ -3167,7 +3173,7 @@
     if (st) { dia.value = String(+st.fecha.slice(3)); mes.value = String(+st.fecha.slice(0, 2)); }
     let close = null;
     const save = () => {
-      const n = nombre.value.trim(), dn = +dia.value.trim(), mn = +mes.value;
+      const n = nombre.value.trim().replace(/^(san|santa|santo)\s+/i, ''), dn = +dia.value.trim(), mn = +mes.value;
       if (!n) { toast('Escribe el nombre.', 'error'); return; }
       if (!(mn >= 1 && mn <= 12) || !(dn >= 1 && dn <= new Date(Date.UTC(2000, mn, 0)).getUTCDate())) { toast('Revisa el día y el mes.', 'error'); return; }
       const fecha = String(mn).padStart(2, '0') + '-' + String(dn).padStart(2, '0');
@@ -3175,6 +3181,9 @@
         const clave = normName(n).replace(/[^a-z ]/g, ' ').replace(/\s+/g, ' ').trim();
         if (!clave) { toast('Escribe el nombre.', 'error'); return; }
         guardarSanto({ clave, nombre: n, fecha, genero: gen.value, calendario: false, manual: true }, {});
+        const st2 = santosDeCumples().lista.find(x => x.clave === clave);
+        if (!st2 || !st2.personas.length) toast('Guardado, pero nadie de los que sigues en Cumples se llama ' + n + '. Márcala en la Agenda con el pastel para que cuente.', 'error', null, 10000);
+        else toast(santoTitulo(st2) + ': ' + st2.personas.map(c => c.nombre).join(', '));
       } else guardarSanto(st, { nombre: st.manual ? n : st.nombre, fecha, genero: gen.value });
       close();
       renderCumpledias();
@@ -3213,7 +3222,7 @@
       return h('div', { class: 'santo-row' + (st.calendario ? ' on' : '') }, tog,
         h('button', { type: 'button', class: 'ev-main as-btn', onclick: () => openSanto(st) },
           h('span', { class: 'ev-name' }, santoTitulo(st)),
-          h('span', { class: 'ev-what' }, santoFechaTxt(st.fecha) + (st.cambiado ? ' (cambiada)' : '') + ' · ' + st.personas.map(c => c.nombre).join(', '))),
+          h('span', { class: 'ev-what' }, santoFechaTxt(st.fecha) + (st.cambiado ? ' (cambiada)' : '') + ' · ' + (st.personas.length ? st.personas.map(c => c.nombre).join(', ') : 'nadie de Cumples se llama así'))),
         h('button', { type: 'button', class: 'icon-btn mini', 'aria-label': 'Editar ' + santoTitulo(st), onclick: () => openSanto(st) }, ICON.edit()));
     });
     return h('section', { class: 'panel santos-panel' },
