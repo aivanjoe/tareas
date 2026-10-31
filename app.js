@@ -3992,6 +3992,8 @@
       else syncDatos();
       // Contactos de Google: solo si el permiso sigue vigente (no se sale de la página sin pedirlo)
       if (ggConnected() && ggTokenOk()) syncContactos().then(() => calSync({ notify: S.ui.view === 'calendario' }));
+      // Sin permiso vigente no se sale de la página, pero se avisa de que Google se queda sin actualizar
+      else if (ggConnected()) toast('El permiso de Google ha caducado: reconecta para actualizar ' + (calReady() ? 'el calendario y los contactos.' : 'los contactos.'), 'error', { label: 'Reconectar', fn: ggLogin }, 10000);
       // Planner: si la sesión del trabajo caducó, este clic lleva a reconectar
       if (plConnected()) { if (S.plState === 'login') plConnect(); else plSync(); }
       doSync();
