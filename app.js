@@ -1807,7 +1807,7 @@
   function renderSyncState() {
     const busy = S.syncing || S.odState === 'syncing' || S.plState === 'syncing' || S.ggState === 'syncing' || S.calState === 'syncing';
     const v = S.ui.view;
-    const ts = v === 'trabajo' ? S.pl.syncedAt : v === 'personal' ? (S.data && S.data.syncedAt) : v === 'contactos' ? S.gg.syncedAt : v === 'calendario' ? S.cal.syncedAt : S.od.syncedAt;
+    const ts = v === 'trabajo' ? S.pl.syncedAt : v === 'personal' || v === 'compra' ? (S.data && S.data.syncedAt) : v === 'contactos' ? S.gg.syncedAt : v === 'calendario' ? S.cal.syncedAt : S.od.syncedAt;
     document.getElementById('syncInfo').textContent = busy ? 'Sincronizando…' : ts ? 'Sincronizado ' + relTime(ts) : '';
     const warns = [];
     if (odConnected() && (S.odState === 'login' || S.odState === 'error')) warns.push(['OneDrive', S.odState, odConnect]);
@@ -2842,6 +2842,7 @@
   const VIEWS = {
     personal: { title: 'Personal', add: 'Añadir tarea', board: 'Todoist' },
     trabajo: { title: 'Trabajo', add: 'Añadir tarea', board: 'Planner' },
+    compra: { title: 'Compra', eyebrow: 'Lista de la compra', add: 'Añadir', el: 'viewCompra', render: () => renderCompra(), onAdd: () => { const i = document.getElementById('compraInput'); if (i) i.focus(); } },
     calendario: { title: 'Calendario', eyebrow: () => calCfg() ? calCfg().nombre : 'Google Calendar', add: 'Nuevo evento', el: 'viewCalendario', render: () => renderCal(), onAdd: () => openCalEvent(null) },
     contactos: { title: 'Contactos', eyebrow: 'Agenda y cumples', add: () => ctTab() === 'agenda' ? 'Nuevo contacto' : 'Elegir contactos', el: 'viewContactos', render: () => renderCumpledias(), onAdd: () => ctTab() === 'agenda' ? openEditContacto(null) : openCdPicker() },
     gastos: { title: 'Gastos', eyebrow: 'Pagos recurrentes', add: 'Nuevo gasto', el: 'viewGastos', render: () => renderGastos(), onAdd: () => openGasto(null) },
@@ -4778,7 +4779,7 @@
       }
       // Planner: si la sesión del trabajo caducó, este clic lleva a reconectar
       if (plConnected()) { if (S.plState === 'login') plConnect(); else trabajos.push(plSync({ notify: v === 'trabajo', manual: true })); }
-      trabajos.push(doSync({ silent: v !== 'personal', manual: true }));
+      trabajos.push(doSync({ silent: v !== 'personal' && v !== 'compra', manual: true }));
       // Una sola entrada de auditoría con el resultado de cada fuente (se registra siempre, aunque no haya cambios)
       Promise.all(trabajos.map(p => p.catch(() => null))).then(rs => {
         const res = rs.flat().filter(Boolean);
@@ -4825,6 +4826,70 @@
       const el = cfg && cfg.el && document.getElementById(cfg.el);
       if (el && !el.hidden && el.dataset.day !== String(todayUtc())) cfg.render();
     }, 60000);
+  }
+
+  // ---------- pantalla Compra ----------
+  // Lista simple del proyecto «Compra» de Todoist (donde también apunta Alexa a través de Homey).
+  // Añadir crea la tarea en ese proyecto; marcar la completa (comprado), con deshacer.
+  const compraProyecto = () => S.data && S.data.projects.find(p => normName(p.name) === 'compra');
+  const compraItems = () => { const p = compraProyecto(); return p ? S.data.items.filter(i => i.project_id === p.id && !i.parent_id).sort((a, b) => a.child_order - b.child_order) : []; };
+  function renderCompra() {
+    const root = document.getElementById('viewCompra');
+    const nota = (msg, label, fn) => root.replaceChildren(h('section', { class: 'panel' }, h('p', { class: 'muted empty-note' }, msg),
+      label ? h('div', { class: 'row-actions' }, h('button', { type: 'button', class: 'btn primary small', onclick: fn }, label)) : null));
+    if (!S.token) return nota('Conecta Todoist para ver aquí tu lista de la compra.', 'Ir a Ajustes', openSettings);
+    if (!S.data) return nota('Cargando tus tareas de Todoist…');
+    const pr = compraProyecto();
+    if (!pr) return nota('Crea en Todoist un proyecto llamado «Compra» y pulsa Sincronizar: aquí verás su lista. Es donde apunta Alexa lo que le dices.', 'Sincronizar', () => doSync());
+    const items = compraItems();
+    const input = h('input', { class: 'input', id: 'compraInput', type: 'text', maxlength: '200', placeholder: 'Añadir a la compra…', 'aria-label': 'Añadir a la compra', autocomplete: 'off', enterkeyhint: 'done' });
+    const add = () => { const v = input.value.trim(); if (!v) return; input.value = ''; compraAnadir(v); };
+    input.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); add(); } });
+    const lista = h('div', { class: 'compra-list' }, items.map(i => {
+      const pend = String(i.id).startsWith('tmp-');
+      return h('div', { class: 'compra-item' + (pend ? ' pending' : '') },
+        h('button', { type: 'button', class: 'check compra-check', 'aria-label': 'Comprado: ' + cleanTitle(i.content), disabled: pend, onclick: () => compraComprado(i.id) }),
+        h('span', { class: 'compra-name' }, cleanTitle(i.content)));
+    }));
+    root.replaceChildren(h('section', { class: 'panel compra-panel' },
+      h('div', { class: 'compra-add' }, input, h('button', { type: 'button', class: 'btn primary small', onclick: add }, ICON.plus(), 'Añadir')),
+      h('div', { class: 'panel-head' }, h('h2', null, items.length ? plural(items.length, 'cosa', 'cosas') + ' por comprar' : 'Nada por comprar')),
+      items.length ? lista : h('p', { class: 'muted empty-note' }, 'La lista está vacía. Añade algo aquí o díselo a Alexa: «Alexa, apunta leche».'),
+      h('p', { class: 'hint' }, 'Es el proyecto «Compra» de Todoist. Lo que apuntas con Alexa llega en un minuto; pulsa Sincronizar para verlo.')));
+  }
+  async function compraAnadir(texto) {
+    const pr = compraProyecto();
+    if (!pr) return;
+    const nombre = texto.charAt(0).toUpperCase() + texto.slice(1);
+    if (compraItems().some(i => normName(cleanTitle(i.content)) === normName(nombre))) { toast('«' + nombre + '» ya está en la lista.'); return; }
+    const tempId = 'tmp-' + uid();
+    const item = { id: tempId, content: nombre, project_id: pr.id, section_id: null, parent_id: null, child_order: compraItems().reduce((m, i) => Math.max(m, i.child_order), 0) + 1, recurring: false };
+    S.data.items.push(item);
+    renderCompra();
+    try {
+      const map = await runCommands([{ type: 'item_add', temp_id: tempId, uuid: uid(), args: { content: nombre, project_id: pr.id } }]);
+      if (!map[tempId]) throw new ApiError('command', 'Todoist no devolvió el identificador.');
+      item.id = map[tempId];
+      saveCache();
+      if (S.ui.view === 'compra') renderCompra();
+    } catch (e) {
+      S.data.items = S.data.items.filter(i => i.id !== tempId);
+      await recover(e);
+    }
+  }
+  async function compraComprado(id) {
+    const idx = S.data.items.findIndex(i => i.id === id);
+    if (idx < 0) return;
+    const [item] = S.data.items.splice(idx, 1);
+    saveCache();
+    renderCompra();
+    toast('Comprado: ' + cleanTitle(item.content), 'ok', { label: 'Deshacer', fn: async () => {
+      S.data.items.push(item);
+      saveCache();
+      if (S.ui.view === 'compra') renderCompra();
+      try { await runCommands([{ type: 'item_uncomplete', uuid: uid(), args: { id: item.id } }]); } catch (e) { await recover(e); }
+    } });
+    try { await runCommands([{ type: 'item_close', uuid: uid(), args: { id } }]); } catch (e) { await recover(e); }
   }
 
   // ---------- pantalla Auditoría ----------
