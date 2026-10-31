@@ -36,7 +36,8 @@ Encima de las tareas de origen, la app añade su propia capa: **etiquetas con no
   - `msal-browser.min.js`: MSAL.js (`@azure/msal-browser`) 4.30.0 (MIT), incluido en el repo como Sortable. Se carga bajo demanda solo si el usuario ha puesto el Client ID de OneDrive. Rama 4 (LTS).
   - `chart.umd.min.js`: Chart.js 4.5.1 (MIT). Se carga bajo demanda al pintar un gráfico.
   - `pdf.min.mjs` y `pdf.worker.min.mjs`: pdf.js 6.4.299 (Apache-2.0), compilación *legacy* para navegadores menos recientes (iPad). Se cargan con `import()` dinámico solo al leer facturas, con `isEvalSupported: false`. Las librerías no llevan versión anti-caché porque no cambian; si se actualizan, cambiar el nombre del fichero.
-  - `favicon.svg`: icono de la pestaña. `apple-touch-icon.png` (180 px): icono de pantalla de inicio en iPad/iPhone, generado a partir del mismo dibujo.
+  - `favicon.svg`: icono de la pestaña. `apple-touch-icon.png` (180 px): icono de pantalla de inicio en iPad/iPhone (el dibujo sobre lima, sin nombre ni marco), generado a partir del mismo dibujo. Con `apple-mobile-web-app-capable` y `apple-mobile-web-app-title` «Visir», desde la pantalla de inicio se abre como app; en iOS esa app guarda sus datos aparte de Safari (hay que conectar las cuentas una vez dentro).
+  - `.gitignore`: ignora `undefined/` (capturas de pruebas lanzadas sin carpeta de salida; no deben subirse).
 - **El navegador habla directamente con las APIs** (Todoist admite CORS desde cualquier origen). No hay servidor intermedio.
 
 ### Almacenamiento en el navegador (localStorage)
