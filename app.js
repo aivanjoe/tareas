@@ -2601,14 +2601,48 @@
     const evInner = e => [h('span', { class: 'cat-dot', style: '--c:' + evColor(e) }),
       h('span', { class: 'ev-main' }, h('span', { class: 'ev-name' }, e.title), h('span', { class: 'ev-what' },
         [evTime(e), e.serie && !e.key ? 'se repite' : '', evOrigin(e) ? 'lo gestiona la app (' + evOrigin(e).toLowerCase() + ')' : ''].filter(Boolean).join(' · ')))];
-    const list = h('div', { class: 'ev-list' }, dayEvs.map(e => e.key
-      ? h('a', { class: 'ev cal-item', href: e.link || '#', target: '_blank', rel: 'noopener noreferrer', title: 'Lo gestiona la app: se cambia desde su pantalla' }, ...evInner(e))
-      : h('button', { type: 'button', class: 'ev cal-item cal-own', onclick: () => openCalEvent(e) }, ...evInner(e))));
+    const list = h('div', { class: 'ev-list' }, dayEvs.map(e =>
+      h('button', { type: 'button', class: 'ev cal-item cal-own', onclick: () => e.key ? openAppEvent(e) : openCalEvent(e) }, ...evInner(e))));
     if (!dayEvs.length) list.append(h('p', { class: 'muted empty-note' }, 'Sin eventos este día.'));
 
     root.replaceChildren(
       h('section', { class: 'panel' }, nav, grid),
       h('section', { class: 'panel' }, h('div', { class: 'panel-head' }, h('h2', null, cap(new Date(utcDay(calSel)).toLocaleDateString('es-ES', { weekday: 'long', day: 'numeric', month: 'long', timeZone: 'UTC' })))), list));
+  }
+
+  // Evento creado por la app: ventana de solo lectura con acceso a lo que lo genera
+  function openAppEvent(e) {
+    const [tipo, id] = e.key.split(':');
+    let desc = '', accion = null;
+    if (tipo === 'cumple' || tipo === 'dias') {
+      const c = (S.datos.colecciones.contactos || {})[id];
+      desc = tipo === 'cumple' ? 'Cumpleaños de un contacto que sigues en Cumples.' : 'Cumpledías especial (múltiplo de 5.000 días de vida) de un contacto que sigues en Cumples.';
+      if (c) accion = ['Ver contacto', () => openContacto(id)];
+    } else if (tipo === 'santo') {
+      const st = santosDeCumples().lista.find(x => x.clave === id);
+      desc = 'Santo del santoral de Cumples' + (st && st.personas.length ? '. Lo celebran: ' + st.personas.map(c => c.nombre).join(', ') + '.' : '.');
+      if (st) accion = ['Editar santo', () => openSanto(st)];
+    } else if (tipo === 'gasto') {
+      const g = (S.datos.colecciones.gastos || {})[id];
+      desc = 'Gasto con «Mostrar en el calendario».' + (g ? ' Se repite según sus meses de cobro.' : '');
+      if (g) accion = ['Ver gasto', () => openGasto(id)];
+    } else if (tipo === 'tarea') {
+      const t = S.data && S.data.items.find(i => i.id === id);
+      desc = 'Tarea de Personal con fecha en el calendario.';
+      if (t) accion = ['Abrir tarea', () => { if (S.ui.view !== 'personal') showView('personal'); openEdit(id); }];
+    }
+    const dia = (e.start || '').slice(0, 10);
+    let close = null;
+    const body = h('div', { class: 'form' },
+      h('div', { class: 'field' }, h('span', { class: 'field-label' }, 'Fecha'),
+        h('span', null, (isYmd(dia) ? cap(new Date(utcDay(dia)).toLocaleDateString('es-ES', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' })) : '') + (e.allDay ? '' : ' · ' + evTime(e)))),
+      desc ? h('p', null, desc) : null,
+      h('p', { class: 'hint' }, 'Lo crea y lo mantiene la app: si lo cambias o lo borras en Google, vuelve como estaba. Se cambia desde su pantalla.'),
+      h('div', { class: 'row-actions modal-foot' },
+        h('span', { class: 'spacer' }),
+        h('button', { type: 'button', class: 'btn subtle small', onclick: () => close() }, 'Cerrar'),
+        accion ? h('button', { type: 'button', class: 'btn primary small', onclick: () => { close(); accion[1](); } }, accion[0]) : null));
+    close = openModal(e.title, body);
   }
 
   // ---- eventos propios del usuario (sin la marca de la app: la puesta al día nunca los toca) ----
@@ -2621,7 +2655,11 @@
     const cid = encodeURIComponent(calCfg().calendarId);
     let src = null;
     if (ev) {
-      try { src = await ggGet(CALAPI + 'calendars/' + cid + '/events/' + encodeURIComponent(ev.serie || ev.id)); }
+      try {
+        src = await ggGet(CALAPI + 'calendars/' + cid + '/events/' + encodeURIComponent(ev.serie || ev.id));
+        // Si era una repetición concreta (copia guardada sin el dato de la serie), se lee la serie
+        if (src.recurringEventId) { ev = Object.assign({}, ev, { serie: src.recurringEventId }); src = await ggGet(CALAPI + 'calendars/' + cid + '/events/' + encodeURIComponent(src.recurringEventId)); }
+      }
       catch (e) { toast(e.message || 'No se pudo leer el evento.', 'error'); return; }
       if (((src.extendedProperties || {}).private || {}).mpApp === '1') { toast('Este evento lo gestiona la app: se cambia desde su pantalla.', 'error'); return; }
     }
@@ -2633,7 +2671,23 @@
     const fin = src ? (src.end.date ? { ymd: src.end.date, hm: '' } : partes(src.end.dateTime)) : null;
     // Días que dura un evento de todo el día (se conservan al cambiar la fecha)
     const span = src && src.start.date && src.end.date ? Math.max(1, Math.round((utcDay(src.end.date) - utcDay(src.start.date)) / DAY)) : 1;
-    const rec0 = src && src.recurrence ? src.recurrence.join('\n') : '';
+    // Repetición: la línea RRULE manda; las demás (EXDATE, días quitados de la serie) se conservan
+    const recLines = (src && src.recurrence) || [];
+    const rrule = recLines.find(l => /^RRULE:/i.test(l)) || '';
+    const recOtras = recLines.filter(l => l !== rrule);
+    // Google añade a veces partes que no cambian nada (WKST, INTERVAL=1, el día de la fecha de inicio)
+    const recSimple = r => {
+      const parts = r.replace(/^RRULE:/i, '').split(';').filter(x => x && !/^WKST=/i.test(x) && !/^INTERVAL=1$/i.test(x));
+      const freq = (parts.find(x => /^FREQ=/i.test(x)) || '').toUpperCase();
+      if (parts.length === 1) return 'RRULE:' + freq;
+      const ini = src && (src.start.date || (src.start.dateTime || '').slice(0, 10));
+      if (!ini) return r;
+      const d = new Date(utcDay(ini)), wd = ['SU', 'MO', 'TU', 'WE', 'TH', 'FR', 'SA'][d.getUTCDay()];
+      const resto = parts.filter(x => x.toUpperCase() !== freq);
+      const igual = x => { const [k, v] = x.toUpperCase().split('='); return (k === 'BYDAY' && freq === 'FREQ=WEEKLY' && v === wd) || (k === 'BYMONTHDAY' && v === String(d.getUTCDate())) || (k === 'BYMONTH' && freq === 'FREQ=YEARLY' && v === String(d.getUTCMonth() + 1)); };
+      return resto.every(igual) ? 'RRULE:' + freq : r;
+    };
+    const rec0 = rrule ? recSimple(rrule) : '';
     const opts = REPETIR.slice();
     if (rec0 && !opts.some(o => o[0] === rec0)) opts.push([rec0, 'Personalizada (como está en Google)']);
 
@@ -2694,7 +2748,8 @@
         body.start = { dateTime: f + 'T' + hIni.value + ':00', timeZone: tz, date: null };
         body.end = { dateTime: fFin + 'T' + hFin.value + ':00', timeZone: tz, date: null };
       }
-      body.recurrence = repetir.value ? repetir.value.split('\n') : [];
+      // Si la repetición no cambia se deja la de Google tal cual; si cambia, se conservan los días quitados
+      body.recurrence = !repetir.value ? [] : repetir.value === rec0 && rrule ? recLines.slice() : [repetir.value].concat(recOtras);
       saveBtn.disabled = true;
       saveBtn.textContent = 'Guardando…';
       try {
@@ -2728,7 +2783,6 @@
       h('div', { class: 'row-actions modal-foot' },
         ev && serie ? h('button', { type: 'button', class: 'btn danger small', onclick: () => borrar(ev.id, '¿Borrar solo el evento de este día?', 'Borrado el evento de ese día') }, 'Borrar este día') : null,
         ev ? h('button', { type: 'button', class: 'btn danger small', onclick: () => borrar(src.id, serie ? '¿Borrar toda la serie? Se puede recuperar desde la papelera de Google Calendar (30 días).' : '¿Borrar este evento? Se puede recuperar desde la papelera de Google Calendar (30 días).', 'Evento borrado') }, serie ? 'Borrar la serie' : 'Borrar') : null,
-        ev && src.htmlLink ? h('a', { class: 'btn subtle small', href: src.htmlLink, target: '_blank', rel: 'noopener noreferrer' }, 'Abrir en Google') : null,
         h('span', { class: 'spacer' }),
         h('button', { type: 'button', class: 'btn subtle small', onclick: () => close() }, 'Cancelar'),
         saveBtn));
