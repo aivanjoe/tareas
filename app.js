@@ -6,10 +6,6 @@
 (() => {
   'use strict';
 
-  // Si esta página se carga dentro de la ventana de login de Microsoft, no arranca la app:
-  // la ventana principal (MSAL) lee la respuesta de la dirección y cierra esta ventana
-  if (window.opener && window.opener !== window && /(^|[#?&])(code|error)=/.test(location.hash + location.search)) return;
-
   const API_URL = 'https://api.todoist.com/api/v1/sync';
   const KEYS = {
     token: 'mp.todoist.token',
@@ -393,9 +389,14 @@
       });
       await app.initialize();
       msalApp = app;
-      // Vuelta de un login por redirección (si el navegador bloqueó la ventana emergente)
-      const res = await app.handleRedirectPromise();
-      if (res && res.account) odLoggedIn(res.account);
+      // Vuelta del login de Microsoft (la respuesta llega en la dirección de la página)
+      try {
+        const res = await app.handleRedirectPromise();
+        if (res && res.account) odLoggedIn(res.account, true);
+      } catch (e) {
+        const cancelled = /access_denied|user_cancelled/.test((e && (e.errorCode + ' ' + e.message)) || '');
+        toast(cancelled ? 'Has cancelado la conexión con OneDrive.' : 'No se pudo conectar con OneDrive: ' + (e.errorMessage || e.message || e.errorCode), 'error', null, 10000);
+      }
       return app;
     });
     msalLoading.catch(() => { msalLoading = null; });
@@ -407,33 +408,38 @@
     return msalApp.getActiveAccount() || msalApp.getAllAccounts()[0] || null;
   }
 
-  function odLoggedIn(account) {
+  function odLoggedIn(account, notify) {
     msalApp.setActiveAccount(account);
     S.od.account = account.username || account.name || 'Cuenta de Microsoft';
     saveOd();
     S.odState = 'idle';
     renderSyncState();
+    if (notify) toast('OneDrive conectado');
     syncDatos();
   }
 
-  // Se llama directamente desde un clic: la ventana emergente debe abrirse sin esperas previas
-  function odConnect() {
-    if (!msalApp) {
-      toast('Preparando el inicio de sesión. Vuelve a pulsar en un momento.');
-      loadMsal().catch(e => toast(e.message, 'error'));
-      return;
+  // Login por redirección: la página va a Microsoft y vuelve; al volver lo procesa loadMsal().
+  // (Sin ventana emergente: el login de Microsoft aísla su ventana y MSAL 4 deja de poder leerla.)
+  async function odConnect() {
+    try {
+      if (!msalApp) await loadMsal();
+      clearStaleInteraction();
+      const acc = odAccount();
+      const req = { scopes: OD_SCOPES, prompt: 'select_account' };
+      if (acc) req.loginHint = acc.username;
+      await msalApp.loginRedirect(req);
+    } catch (e) {
+      toast('No se pudo conectar con OneDrive: ' + (e.errorMessage || e.message || e.errorCode), 'error', null, 10000);
     }
-    const acc = odAccount();
-    const req = { scopes: OD_SCOPES, prompt: 'select_account' };
-    if (acc) req.loginHint = acc.username;
-    msalApp.loginPopup(req)
-      .then(res => odLoggedIn(res.account))
-      .catch(e => {
-        const code = e && e.errorCode;
-        if (code === 'popup_window_error' || code === 'empty_window_error') return msalApp.loginRedirect(req);
-        if (code === 'user_cancelled') return;
-        toast('No se pudo conectar con OneDrive: ' + (e.message || code), 'error');
-      });
+  }
+
+  // Un intento anterior que no terminó deja la marca de "inicio de sesión en curso" y bloquea
+  // los siguientes (interaction_in_progress); al pulsar Conectar se descarta
+  function clearStaleInteraction() {
+    for (const st of [sessionStorage, localStorage]) {
+      try { Object.keys(st).filter(k => k.startsWith('msal.') && k.endsWith('interaction.status')).forEach(k => st.removeItem(k)); }
+      catch (e) { /* almacenamiento no disponible */ }
+    }
   }
 
   async function odDisconnect() {
@@ -1501,7 +1507,7 @@
     document.getElementById('sidebarScrim').addEventListener('click', () => toggleSidebar(false));
     document.getElementById('drawerScrim').addEventListener('click', closeDrawer);
     document.getElementById('syncBtn').addEventListener('click', () => {
-      // Si la sesión de OneDrive caducó, este clic sirve para abrir la ventana de login
+      // Si la sesión de OneDrive caducó, este clic lleva al login de Microsoft
       if (odConnected() && S.odState === 'login') odConnect();
       else syncDatos();
       doSync();
