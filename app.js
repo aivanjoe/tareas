@@ -1755,9 +1755,20 @@
     });
     const t = new Date(today);
     const finMes = Date.UTC(t.getUTCFullYear(), t.getUTCMonth() + 1, 0);
-    const prox30 = activos.filter(x => x.until !== null && x.until >= 0 && x.until <= 30);
     const hastaFin = activos.filter(x => x.until !== null && x.until >= 0 && x.due <= finMes);
     const vencidos = activos.filter(x => x.until !== null && x.until < 0);
+    // Mes que viene: todos los vencimientos de ese mes a partir del próximo de cada gasto
+    // (un gasto mensual que toca este mes cuenta también su cuota del mes siguiente)
+    const ini = Date.UTC(t.getUTCFullYear(), t.getUTCMonth() + 1, 1), fin = Date.UTC(t.getUTCFullYear(), t.getUTCMonth() + 2, 0);
+    const mesQueViene = [];
+    for (const x of activos) {
+      if (x.due === null) continue;
+      const y = t.getUTCFullYear();
+      const fechas = new Set(vencimientos(x.g, y, y + 1).filter(d => d >= x.due));
+      fechas.add(x.due);
+      for (const d of fechas) if (d >= ini && d <= fin) mesQueViene.push(x);
+    }
+    const nombreMes = new Date(ini).toLocaleDateString('es-ES', { month: 'long', timeZone: 'UTC' });
     const sum = arr => arr.reduce((a, x) => a + (Number(x.g.importe) || 0), 0);
     const stat = (label, value, sub, cls) => h('div', { class: 'stat' + (cls ? ' ' + cls : '') },
       h('span', { class: 'stat-label' }, label), h('span', { class: 'stat-value' }, value), h('span', { class: 'stat-sub' }, sub));
@@ -1794,8 +1805,8 @@
 
     root.replaceChildren(
       h('div', { class: 'stats three' },
-        stat('Próximos 30 días', fmtEur(sum(prox30)), prox30.length + (prox30.length === 1 ? ' gasto' : ' gastos'), 'accent'),
-        stat('Hasta fin de mes', fmtEur(sum(hastaFin)), hastaFin.length + (hastaFin.length === 1 ? ' gasto' : ' gastos')),
+        stat('Hasta fin de mes', fmtEur(sum(hastaFin)), hastaFin.length + (hastaFin.length === 1 ? ' gasto' : ' gastos'), 'accent'),
+        stat('Mes que viene', fmtEur(sum(mesQueViene)), mesQueViene.length + (mesQueViene.length === 1 ? ' cobro' : ' cobros') + ' en ' + nombreMes),
         stat('Vencidos', String(vencidos.length), vencidos.length ? fmtEur(sum(vencidos)) + ' sin registrar' : 'todo al día', vencidos.length ? 'danger' : '')),
       head,
       h('section', { class: 'panel' }, chips, list));
