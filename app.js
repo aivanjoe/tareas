@@ -309,8 +309,6 @@
     for (const p of S.data.projects) {
       sel.append(h('option', { value: p.id, selected: p.id === pid }, p.inbox ? 'Bandeja de entrada' : p.name));
     }
-    const count = S.data.items.filter(i => i.project_id === pid && !i.parent_id).length;
-    document.getElementById('taskCount').textContent = String(count);
   }
 
   function renderSyncState() {
