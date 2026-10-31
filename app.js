@@ -305,6 +305,7 @@
       case 'pagos': return 'Pago de ' + q(r.concepto) + (r.fecha ? ' (' + r.fecha + ')' : '') + ' ' + verbo;
       case 'consumos': return 'Factura de ' + (r.tipo || 'consumo') + (r.fin ? ' hasta ' + r.fin : '') + ' ' + verba;
       case 'santos': return 'Santo ' + q(r.nombre) + ' ' + verbo;
+      case 'festivos': return r.quitado ? 'Festivo oficial del ' + (r.fecha || id) + ' quitado' : 'Festivo ' + q(r.nombre) + ' (' + (r.fecha || id) + ') ' + verbo;
       case 'etiquetas': return 'Etiqueta ' + q(r.name) + ' ' + verba;
       case 'asignaciones': return String(id).startsWith('tmp-') ? null : 'Etiquetas de la tarea ' + tarea(id) + ' cambiadas';
       case 'orden': return 'Orden de las etiquetas cambiado';
@@ -1645,6 +1646,8 @@
         description: 'Lo celebran: ' + st.personas.map(shortName).join(', ') + '.\nCreado por Visir.'
       });
     }
+    // Festivos de la lista (Calendario → Festivos): un evento rojo por día
+    for (const f of festivosLista()) ev('festivo:' + f.fecha, 'Festivo · ' + f.nombre, f.fecha, { colorId: '11' });
     // Gastos marcados para el calendario (activos)
     for (const g of gastos()) {
       if (!g.calendario || g.activo === false) continue;
@@ -2915,12 +2918,13 @@
     if (k.startsWith('cumple:')) return '#E68AC4';
     if (k.startsWith('dias:')) return '#F2B35B';
     if (k.startsWith('santo:')) return SANTO_COLOR;
+    if (k.startsWith('festivo:')) return FESTIVO_COLOR;
     if (k.startsWith('tarea:')) return '#DBF266';
     if (k.startsWith('gasto:')) return '#F5D76E';
     const c = calCfg() && calCfg().color;
     return isHex(c) ? c : '#7FA2E0';
   }
-  const evOrigin = e => (e.key || '').startsWith('cumple:') ? 'Cumpleaños' : (e.key || '').startsWith('dias:') ? 'Cumpledías' : (e.key || '').startsWith('santo:') ? 'Santo' : (e.key || '').startsWith('gasto:') ? 'Gasto' : (e.key || '').startsWith('tarea:') ? 'Tarea' : '';
+  const evOrigin = e => (e.key || '').startsWith('cumple:') ? 'Cumpleaños' : (e.key || '').startsWith('dias:') ? 'Cumpledías' : (e.key || '').startsWith('santo:') ? 'Santo' : (e.key || '').startsWith('festivo:') ? 'Festivo' : (e.key || '').startsWith('gasto:') ? 'Gasto' : (e.key || '').startsWith('tarea:') ? 'Tarea' : '';
   // Día(s) de un evento: los de todo el día ocupan [inicio, fin); los de hora, su día local de inicio
   function evOnDay(e, ymd) {
     if (e.allDay) return e.start <= ymd && ymd < (e.end || addDays(e.start, 1));
@@ -2958,6 +2962,7 @@
       h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Mes siguiente', onclick: () => { calMonth = Date.UTC(Y, M + 1, 1); renderCal(); } }, ICON.right()),
       h('button', { type: 'button', class: 'btn subtle small', onclick: () => { calMonth = null; calSel = null; renderCal(); } }, 'Hoy'),
       calVistaSeg(),
+      h('button', { type: 'button', class: 'btn subtle small', onclick: () => openFestivos() }, 'Festivos'),
       calLoading ? h('span', { class: 'muted' }, 'Leyendo…') : null,
       calLeyenda());
 
@@ -2969,7 +2974,7 @@
       const ymd = ymdOf(start + i * DAY);
       const evs = S.cal.events.filter(e => evOnDay(e, ymd));
       const cell = h('button', {
-        type: 'button', class: 'cal-day' + (ymd.slice(0, 7) !== first.slice(0, 7) ? ' out' : '') + (ymd === today ? ' today' : '') + (ymd === calSel ? ' sel' : ''),
+        type: 'button', class: 'cal-day' + (ymd.slice(0, 7) !== first.slice(0, 7) ? ' out' : '') + (ymd === today ? ' today' : '') + (ymd === calSel ? ' sel' : '') + (festivoDe(ymd) ? ' festivo' : ''),
         'aria-label': fmtDay(utcDay(ymd)) + (evs.length ? ', ' + evs.length + (evs.length === 1 ? ' evento' : ' eventos') : ''),
         onclick: () => { calSel = ymd; if (ymd.slice(0, 7) !== first.slice(0, 7)) calMonth = Date.UTC(+ymd.slice(0, 4), +ymd.slice(5, 7) - 1, 1); renderCal(); }
       },
@@ -3012,7 +3017,7 @@
   }
   const calLeyenda = () => h('div', { class: 'legend cal-legend' },
     h('span', { class: 'lg', style: '--c:#E68AC4' }, 'Cumpleaños'), h('span', { class: 'lg', style: '--c:#F2B35B' }, 'Cumpledías'), h('span', { class: 'lg', style: '--c:' + SANTO_COLOR }, 'Santos'),
-    h('span', { class: 'lg', style: '--c:#F5D76E' }, 'Gastos'), h('span', { class: 'lg', style: '--c:#DBF266' }, 'Tareas'));
+    h('span', { class: 'lg', style: '--c:#F5D76E' }, 'Gastos'), h('span', { class: 'lg', style: '--c:#DBF266' }, 'Tareas'), h('span', { class: 'lg', style: '--c:' + FESTIVO_COLOR }, 'Festivos'));
 
   // Vista de semana (lunes a domingo): cada día con sus eventos con el nombre entero.
   // En el móvil, un día debajo de otro; en pantallas anchas, siete columnas.
@@ -3039,11 +3044,12 @@
       h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Semana siguiente', onclick: () => mover(7) }, ICON.right()),
       h('button', { type: 'button', class: 'btn subtle small', onclick: () => { calMonth = null; calSel = null; renderCal(); } }, 'Hoy'),
       calVistaSeg(),
+      h('button', { type: 'button', class: 'btn subtle small', onclick: () => openFestivos() }, 'Festivos'),
       calLoading ? h('span', { class: 'muted' }, 'Leyendo…') : null,
       calLeyenda());
     const semana = h('div', { class: 'cal-week' }, dias.map(ymd => {
       const evs = evsDelDia(ymd);
-      return h('div', { class: 'wk-day' + (ymd === today ? ' today' : '') + (ymd === calSel ? ' sel' : '') },
+      return h('div', { class: 'wk-day' + (ymd === today ? ' today' : '') + (ymd === calSel ? ' sel' : '') + (festivoDe(ymd) ? ' festivo' : '') },
         h('button', { type: 'button', class: 'wk-head', 'aria-label': cap(f(ymd, { weekday: 'long', day: 'numeric', month: 'long' })), onclick: () => { calSel = ymd; renderCal(); } },
           h('span', { class: 'wk-wd' }, f(ymd, { weekday: 'short' }).replace('.', '')),
           h('span', { class: 'wk-num' }, String(+ymd.slice(8)))),
@@ -3052,6 +3058,100 @@
           h('span', { class: 'wk-title' }, e.title))) : h('span', { class: 'wk-none' }, 'Sin eventos')));
     }));
     root.replaceChildren(h('section', { class: 'panel' }, nav, semana));
+  }
+
+  // ---- festivos ----
+  // Colección "festivos": { id: 'AAAA-MM-DD', fecha, nombre, tipo: nacional|autonomico|local|empresa|otro }.
+  // Se crean como eventos rojos en el calendario («Festivo · nombre») y sombrean el día en Visir.
+  // Los oficiales de cada año (Comunitat Valenciana y València ciudad) van aquí y se cargan con un botón;
+  // hay que añadir cada año nuevo cuando se publique su calendario laboral.
+  const FESTIVO_COLOR = '#E5534B';
+  const FESTIVO_TIPOS = { nacional: 'Nacional', autonomico: 'Autonómico', local: 'Local', empresa: 'De empresa', otro: 'Otro' };
+  const FESTIVOS_OFICIALES = {
+    2026: [ // DOGV: calendario laboral 2026 de la Comunitat Valenciana y fiestas locales de València
+      ['2026-01-01', 'Año Nuevo', 'nacional'], ['2026-01-06', 'Epifanía del Señor', 'nacional'],
+      ['2026-01-22', 'San Vicente Mártir', 'local'], ['2026-03-19', 'San José', 'autonomico'],
+      ['2026-04-03', 'Viernes Santo', 'nacional'], ['2026-04-06', 'Lunes de Pascua', 'autonomico'],
+      ['2026-04-13', 'San Vicente Ferrer', 'local'], ['2026-05-01', 'Fiesta del Trabajo', 'nacional'],
+      ['2026-06-24', 'San Juan', 'autonomico'], ['2026-08-15', 'Asunción de la Virgen', 'nacional'],
+      ['2026-10-09', 'Día de la Comunitat Valenciana', 'autonomico'], ['2026-10-12', 'Fiesta Nacional de España', 'nacional'],
+      ['2026-12-08', 'Inmaculada Concepción', 'nacional'], ['2026-12-25', 'Navidad', 'nacional']
+    ]
+  };
+  // Un oficial quitado a propósito se guarda como { quitado: true } para no volver a ofrecerlo al cargar
+  const festivosLista = () => Object.values(S.datos.colecciones.festivos || {}).filter(f => isYmd(f.fecha) && f.nombre && !f.quitado).sort((a, b) => a.fecha.localeCompare(b.fecha));
+  const festivoDe = ymd => { const f = (S.datos.colecciones.festivos || {})[ymd]; return f && f.nombre && !f.quitado ? f : null; };
+  const esOficial = ymd => (FESTIVOS_OFICIALES[+String(ymd).slice(0, 4)] || []).some(([fe]) => fe === ymd);
+  function quitarFestivo(ymd) {
+    const rest = Object.assign({}, S.datos.colecciones.festivos);
+    if (esOficial(ymd)) rest[ymd] = { id: ymd, fecha: ymd, quitado: true }; else delete rest[ymd];
+    S.datos.colecciones.festivos = rest;
+  }
+  function guardarFestivo(f) {
+    S.datos.colecciones.festivos = Object.assign({}, S.datos.colecciones.festivos, { [f.fecha]: { id: f.fecha, fecha: f.fecha, nombre: f.nombre, tipo: f.tipo } });
+  }
+
+  // Ventana «Festivos»: lista por años para revisar, añadir, cambiar y borrar
+  function openFestivos(anioIni) {
+    let anio = anioIni || new Date().getFullYear();
+    let editando = null; // fecha del festivo que se está editando, o 'nuevo'
+    const body = h('div', { class: 'form festivos' });
+    const diaTxt = ymd => cap(new Date(utcDay(ymd)).toLocaleDateString('es-ES', { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'UTC' })).replace(/\./g, '');
+    const formulario = cur => {
+      const fecha = h('input', { class: 'input', type: 'date', 'aria-label': 'Fecha', value: cur ? cur.fecha : anio + '-12-24' });
+      const nombre = h('input', { class: 'input', type: 'text', maxlength: '80', placeholder: 'Nombre (p. ej. Nochebuena)', 'aria-label': 'Nombre', autocomplete: 'off', value: cur ? cur.nombre : '' });
+      const tipo = h('select', { class: 'select', 'aria-label': 'Tipo' }, Object.entries(FESTIVO_TIPOS).map(([k, l]) => h('option', { value: k, selected: (cur ? cur.tipo : 'empresa') === k }, l)));
+      const ok = () => {
+        const fe = fecha.value, n = nombre.value.trim();
+        if (!isYmd(fe)) { toast('Elige la fecha.', 'error'); return; }
+        if (!n) { toast('Escribe el nombre.', 'error'); nombre.focus(); return; }
+        if (cur && cur.fecha !== fe) quitarFestivo(cur.fecha);
+        guardarFestivo({ fecha: fe, nombre: n, tipo: tipo.value });
+        saveDatos();
+        editando = null; anio = +fe.slice(0, 4); pinta();
+        if (S.ui.view === 'calendario') renderCal();
+      };
+      nombre.addEventListener('keydown', e => { if (e.key === 'Enter') ok(); });
+      setTimeout(() => nombre.focus(), 30);
+      return h('div', { class: 'fest-form' }, h('div', { class: 'fest-campos' }, fecha, nombre, tipo),
+        h('div', { class: 'row-actions' }, h('span', { class: 'spacer' }),
+          h('button', { type: 'button', class: 'btn subtle small', onclick: () => { editando = null; pinta(); } }, 'Cancelar'),
+          h('button', { type: 'button', class: 'btn primary small', onclick: ok }, cur ? 'Guardar' : 'Añadir')));
+    };
+    const pinta = () => {
+      const lista = festivosLista().filter(f => f.fecha.startsWith(anio + '-'));
+      const oficiales = FESTIVOS_OFICIALES[anio] || [];
+      const faltan = oficiales.filter(([fe]) => !(S.datos.colecciones.festivos || {})[fe]); // ni cargado ni quitado
+      const filas = lista.map(f => editando === f.fecha ? formulario(f) : h('div', { class: 'fest-row' },
+        h('span', { class: 'fest-fecha' }, diaTxt(f.fecha)),
+        h('span', { class: 'fest-nombre' }, f.nombre),
+        h('span', { class: 'fest-tipo t-' + f.tipo }, FESTIVO_TIPOS[f.tipo] || 'Otro'),
+        h('button', { type: 'button', class: 'icon-btn mini', 'aria-label': 'Cambiar ' + f.nombre, onclick: () => { editando = f.fecha; pinta(); } }, ICON.edit()),
+        h('button', { type: 'button', class: 'icon-btn mini', 'aria-label': 'Quitar ' + f.nombre, onclick: () => {
+          if (!confirm('¿Quitar «' + f.nombre + '» de los festivos? Se borrará también su evento del calendario.')) return;
+          quitarFestivo(f.fecha);
+          saveDatos(); pinta(); if (S.ui.view === 'calendario') renderCal();
+        } }, ICON.trash())));
+      body.replaceChildren(
+        h('div', { class: 'fest-anio' },
+          h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Año anterior', onclick: () => { anio--; editando = null; pinta(); } }, ICON.left()),
+          h('h3', null, String(anio)),
+          h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Año siguiente', onclick: () => { anio++; editando = null; pinta(); } }, ICON.right())),
+        faltan.length ? h('div', { class: 'fest-cargar' },
+          h('p', { class: 'hint' }, plural(faltan.length, 'festivo oficial', 'festivos oficiales') + ' de ' + anio + ' (Comunitat Valenciana y València ciudad) sin cargar.'),
+          h('button', { type: 'button', class: 'btn primary small', onclick: () => {
+            for (const [fe, n, t] of faltan) guardarFestivo({ fecha: fe, nombre: n, tipo: t });
+            saveDatos(); pinta(); if (S.ui.view === 'calendario') renderCal();
+            toast(plural(faltan.length, 'festivo cargado', 'festivos cargados') + '. Revísalos y cambia lo que haga falta.');
+          } }, 'Cargar festivos de ' + anio))
+          : !oficiales.length ? h('p', { class: 'hint' }, 'Visir aún no tiene los festivos oficiales de ' + anio + '. Cuando se publique el calendario laboral, pídelos o añádelos a mano.') : null,
+        filas.length ? h('div', { class: 'fest-list' }, filas) : h('p', { class: 'muted empty-note' }, 'Sin festivos en ' + anio + '.'),
+        editando === 'nuevo' ? formulario(null) : h('div', { class: 'row-actions' },
+          h('button', { type: 'button', class: 'btn ghost small', onclick: () => { editando = 'nuevo'; pinta(); } }, ICON.plus(), 'Añadir día')),
+        h('p', { class: 'hint' }, 'Cada festivo sale en tu calendario como «Festivo · nombre», en rojo, y el día se sombrea en Visir. Añade aquí también los días que os da la empresa.'));
+    };
+    pinta();
+    openModal('Festivos', body);
   }
 
   // Evento creado por la app: ventana de solo lectura con acceso a lo que lo genera
@@ -3070,6 +3170,10 @@
       const g = (S.datos.colecciones.gastos || {})[id];
       desc = 'Gasto con «Mostrar en el calendario».' + (g ? ' Se repite según sus meses de cobro.' : '');
       if (g) accion = ['Ver gasto', () => openGasto(id)];
+    } else if (tipo === 'festivo') {
+      const f = festivoDe(id);
+      desc = f ? 'Festivo ' + FESTIVO_TIPOS[f.tipo].toLowerCase() + ', de tu lista de festivos.' : 'Festivo de tu lista de festivos.';
+      accion = ['Ver festivos', () => openFestivos(+String(id).slice(0, 4))];
     } else if (tipo === 'tarea') {
       const t = S.data && S.data.items.find(i => i.id === id);
       desc = 'Tarea de Personal con fecha en el calendario.';
