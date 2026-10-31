@@ -459,10 +459,10 @@ a.btn { text-decoration: none; }
 }
 
 /* ===== Consumos ===== */
-.stat.pick { text-align: left; cursor: pointer; font: inherit; color: inherit; transition: border-color 0.12s, background 0.12s; }
-.stat.pick:hover { background: #151C26; }
-.stat.pick.on { border-color: color-mix(in srgb, var(--c) 60%, transparent); background: color-mix(in srgb, var(--c) 7%, var(--col)); }
-.stat.pick.on .stat-value { color: var(--c); }
+.stat.tipo-pick { text-align: left; cursor: pointer; font: inherit; color: inherit; transition: border-color 0.12s, background 0.12s; }
+.stat.tipo-pick:hover { background: #151C26; }
+.stat.tipo-pick.on { border-color: color-mix(in srgb, var(--c) 60%, transparent); background: color-mix(in srgb, var(--c) 7%, var(--col)); }
+.stat.tipo-pick.on .stat-value { color: var(--c); }
 .estimate { flex-direction: row; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px 24px; }
 .est-main { display: flex; flex-direction: column; gap: 4px; }
 .est-value { font-size: 26px; font-weight: 800; letter-spacing: -0.02em; color: var(--text); }
@@ -477,9 +477,9 @@ a.btn { text-decoration: none; }
 .row-tools { display: flex; gap: 2px; }
 @media (max-width: 700px) {
   .stats.three.picks { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
-  .stats.three .stat.pick { padding: 12px; }
-  .stat.pick .stat-value { font-size: 17px; }
-  .stat.pick .stat-sub { white-space: normal; font-size: 11.5px; }
+  .stats.three .stat.tipo-pick { padding: 12px; }
+  .stat.tipo-pick .stat-value { font-size: 17px; }
+  .stat.tipo-pick .stat-sub { white-space: normal; font-size: 11.5px; }
   .legend { margin-left: 0; }
   .chart-box { height: 200px; }
 }
@@ -549,3 +549,7 @@ a.btn { text-decoration: none; }
   .cal-dots { display: flex; justify-content: center; }
   .cal-legend { margin-left: 0; }
 }
+
+.g-cal { display: inline-flex; margin-left: 6px; color: var(--accent); vertical-align: -2px; }
+.g-cal svg { width: 14px; height: 14px; }
+.panel > .seg { align-self: flex-start; }

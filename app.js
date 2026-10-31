@@ -3143,6 +3143,9 @@
   let rYear = null;        // año del resumen (null: el actual)
   let gChart = null;
   let gCat = 'Todas';
+  let gPer = 'todos'; // todos | mensuales | periodicos
+  // Mensual: se cobra todos los meses; periódico: el resto (trimestral, anual…)
+  const esMensual = g => (Array.isArray(g.meses) && g.meses.length ? g.meses.length === 12 : (g.periodicidad || 'mensual') === 'mensual');
   let hYear = 'Todos';
 
   const gastos = () => Object.values(S.datos.colecciones.gastos || {});
@@ -3262,7 +3265,10 @@
       'aria-pressed': gCat === c ? 'true' : 'false', onclick: () => { gCat = c; renderGastos(); }
     }, c === 'Todas' ? null : h('span', { class: 'dot' }), c)));
 
-    const inCat = x => gCat === 'Todas' || x.g.categoria === gCat;
+    const inCat = x => (gCat === 'Todas' || x.g.categoria === gCat) && (gPer === 'todos' || (gPer === 'mensuales') === esMensual(x.g));
+    const perSeg = h('div', { class: 'seg', role: 'group', 'aria-label': 'Periodicidad' },
+      [['todos', 'Todos'], ['mensuales', 'Mensuales'], ['periodicos', 'Periódicos']].map(([k, label]) =>
+        h('button', { type: 'button', class: gPer === k ? 'on' : '', 'aria-pressed': gPer === k ? 'true' : 'false', onclick: () => { gPer = k; renderGastos(); } }, label)));
     const list = h('div', { class: 'ev-list' });
     const rows = activos.filter(inCat).sort((a, b) => (a.due ?? Infinity) - (b.due ?? Infinity) || a.g.concepto.localeCompare(b.g.concepto, 'es'));
     for (const x of rows) list.append(gastoRow(x.g, x.due, x.until));
@@ -3279,7 +3285,7 @@
         stat('Mes que viene', fmtEur(sum(mesQueViene)), mesQueViene.length + (mesQueViene.length === 1 ? ' cobro' : ' cobros') + ' en ' + nombreMes),
         stat('Vencidos', String(vencidos.length), vencidos.length ? fmtEur(sum(vencidos)) + ' sin registrar' : 'todo al día', vencidos.length ? 'danger' : '')),
       head,
-      h('section', { class: 'panel' }, chips, list));
+      h('section', { class: 'panel' }, perSeg, chips, list));
   }
 
   function gastoRow(g, due, until, paused) {
@@ -3290,7 +3296,7 @@
     return h('div', { class: 'ev gasto' + (paused ? ' paused' : '') + (until !== null && until < 0 ? ' late' : '') },
       h('span', { class: 'cat-dot', style: '--c:' + catColor(g.categoria), title: g.categoria || 'Otros' }),
       h('button', { type: 'button', class: 'ev-main as-btn', onclick: () => openGasto(g.id), title: 'Editar' },
-        h('span', { class: 'ev-name' }, g.concepto),
+        h('span', { class: 'ev-name' }, g.concepto, g.calendario ? h('span', { class: 'g-cal', title: 'En el calendario', 'aria-label': 'En el calendario' }, ICON.calendar()) : null),
         h('span', { class: 'ev-what' }, sub.join(' · '))),
       h('div', { class: 'ev-when' },
         h('span', { class: 'ev-amount' }, fmtEur(g.importe)),
@@ -3804,10 +3810,10 @@
 
     const cards = h('div', { class: 'stats three picks' }, Object.entries(TIPOS).map(([k, T]) => {
       const l = latest(k);
-      return h('button', { type: 'button', class: 'stat pick' + (cTipo === k ? ' on' : ''), style: '--c:' + T.color, 'aria-pressed': cTipo === k ? 'true' : 'false', onclick: () => { cTipo = k; renderConsumos(); } },
+      return h('button', { type: 'button', class: 'stat tipo-pick' + (cTipo === k ? ' on' : ''), style: '--c:' + T.color, 'aria-pressed': cTipo === k ? 'true' : 'false', onclick: () => { cTipo = k; renderConsumos(); } },
         h('span', { class: 'stat-label' }, T.nombre),
         h('span', { class: 'stat-value' }, l && l.coste !== null ? fmtEur(l.coste) : '—'),
-        h('span', { class: 'stat-sub' }, l ? cap(MESES_LARGOS[l.mes - 1]) + ' ' + l.anio + (l[T.campo] !== null && l[T.campo] !== undefined ? ' · ' + fmtCant(l[T.campo], T.unidad) : '') : 'sin datos'));
+        h('span', { class: 'stat-sub' }, l ? MESES_CORTOS[l.mes - 1].toLowerCase() + ' ' + l.anio : 'sin datos'));
     }));
 
     const T = TIPOS[cTipo];
