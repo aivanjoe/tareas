@@ -161,7 +161,7 @@ body.tag-dragging, body.tag-dragging * { cursor: grabbing !important; }
 .board-wrap { flex: 1; min-height: 0; overflow: auto; padding: 0 28px calc(28px + env(safe-area-inset-bottom)); }
 .board { display: flex; gap: 14px; align-items: flex-start; height: 100%; }
 .column {
-  flex: 0 0 290px; width: 290px; max-height: 100%;
+  flex: 1 1 0; min-width: 300px; max-width: 620px; max-height: 100%;
   background: var(--col); border: 1px solid rgba(255, 255, 255, 0.05); border-radius: 14px;
   padding: 10px; display: flex; flex-direction: column; gap: 6px;
 }
@@ -179,8 +179,9 @@ body.tag-dragging, body.tag-dragging * { cursor: grabbing !important; }
 
 .card {
   --strip: transparent;
-  position: relative; height: 40px; flex: 0 0 auto;
-  display: flex; align-items: center; gap: 10px; padding: 0 10px 0 13px;
+  position: relative; min-height: 40px; flex: 0 0 auto;
+  display: grid; grid-template-columns: 16px minmax(0, 1fr); align-items: center;
+  column-gap: 10px; row-gap: 5px; padding: 10px 12px 10px 13px;
   background: var(--card); border: 1px solid var(--line); border-radius: 9px; overflow: hidden;
   cursor: grab; transition: background 0.12s, border-color 0.12s;
 }
@@ -198,11 +199,11 @@ body.tag-dragging, body.tag-dragging * { cursor: grabbing !important; }
 .check::after { content: ''; position: absolute; inset: -12px; }
 .check:hover { border-color: var(--accent); background: rgba(219, 242, 102, 0.15); }
 .card-title {
-  flex: 1 1 auto; min-width: 0; padding: 0; border: none; background: transparent; text-align: left;
-  font-size: 13.5px; font-weight: 600; color: var(--text);
+  min-width: 0; padding: 0; border: none; background: transparent; text-align: left;
+  font-size: 14px; font-weight: 600; color: var(--text);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer;
 }
-.card-tags { flex: 0 1 auto; max-width: 55%; display: flex; gap: 4px; overflow: hidden; }
+.card-tags { grid-column: 2; display: flex; flex-wrap: wrap; gap: 4px; }
 .mini-tag {
   --c: #9AA4B5;
   flex: 0 0 auto; display: inline-flex; align-items: center; height: 18px; padding: 0 7px; border-radius: 999px;
@@ -309,5 +310,5 @@ body.tag-dragging, body.tag-dragging * { cursor: grabbing !important; }
   .tagbar { margin: 0 16px 14px; }
   .tagbar-label span { display: none; }
   .board-wrap { padding: 0 16px calc(16px + env(safe-area-inset-bottom)); scroll-snap-type: x mandatory; }
-  .column { flex-basis: calc(100vw - 48px); width: calc(100vw - 48px); scroll-snap-align: start; }
+  .column { flex: 0 0 calc(100vw - 48px); min-width: 0; max-width: none; width: calc(100vw - 48px); scroll-snap-align: start; }
 }
