@@ -221,7 +221,8 @@
     if (opts.auto) rec.auto = true;
     if (opts.fuentes) rec.fuentes = opts.fuentes;
     S.datos.colecciones.auditoria = Object.assign({}, S.datos.colecciones.auditoria, { [rec.id]: rec });
-    store.set(KEYS.datos, S.datos); // sin subir al momento: va en la próxima sincronización con OneDrive
+    store.set(KEYS.datos, S.datos);
+    audProgramarSubida();
     if (S.ui && S.ui.view === 'auditoria') { clearTimeout(audRender); audRender = setTimeout(() => { if (S.ui.view === 'auditoria') renderAuditoria(); }, 200); }
   }
   const plural = (n, uno, varios) => n + ' ' + (n === 1 ? uno : (varios || uno + 's'));
@@ -311,6 +312,43 @@
     S.datos.colecciones.auditoria = Object.assign({}, S.datos.colecciones.auditoria, { [rec.id]: rec });
     if (S.ui && S.ui.view === 'auditoria') { clearTimeout(audRender); audRender = setTimeout(() => { if (S.ui.view === 'auditoria') renderAuditoria(); }, 200); }
   }
+
+  // Excepción a la sincronización manual (decisión del usuario), solo para la Auditoría:
+  // - lo que registra este dispositivo se sube solo a OneDrive 1 minuto después del último registro
+  //   (una sola subida para varios seguidos; sin reintentos si OneDrive falla) y al salir de la app;
+  // - con la pantalla Auditoría abierta y visible, cada 2 minutos se lee y sube el fichero de OneDrive.
+  // Solo OneDrive: Todoist, Planner y Google no se tocan.
+  const AUD_SUBIDA_MS = 60000, AUD_REFRESCO_MS = 120000;
+  let audSubidaTimer = null, audRefresco = null, audUltimaLectura = 0;
+  const audPendiente = () => {
+    if (!S.odBase) return Object.keys(S.datos.colecciones.auditoria || {}).length > 0;
+    return stable(S.datos.colecciones.auditoria || {}) !== stable(normalizeDoc(S.odBase).colecciones.auditoria || {});
+  };
+  const odUsable = () => odConnected() && S.odState !== 'login' && S.odState !== 'error';
+  function audProgramarSubida() {
+    if (!odUsable()) return;
+    clearTimeout(audSubidaTimer);
+    audSubidaTimer = setTimeout(() => { if (odUsable() && S.odState !== 'syncing' && audPendiente()) syncDatos(); }, AUD_SUBIDA_MS);
+  }
+  async function audActualizar(opts = {}) {
+    if (!odConnected() || S.odState === 'syncing' || S.odState === 'login') return;
+    audUltimaLectura = Date.now();
+    await syncDatos(opts);
+    if (S.ui.view === 'auditoria') renderAuditoria();
+  }
+  // Refresco periódico: solo con la Auditoría abierta y la pestaña visible
+  function audVigilar() {
+    const activa = S.ui.view === 'auditoria' && document.visibilityState === 'visible' && odConnected();
+    if (!activa) { clearInterval(audRefresco); audRefresco = null; return; }
+    if (!audRefresco) audRefresco = setInterval(() => { if (S.ui.view === 'auditoria' && document.visibilityState === 'visible') audActualizar(); else audVigilar(); }, AUD_REFRESCO_MS);
+    if (Date.now() - audUltimaLectura > AUD_REFRESCO_MS) audActualizar();
+  }
+  document.addEventListener('visibilitychange', () => {
+    // Al salir de la app se intenta subir lo pendiente (el móvil suspende la pestaña al poco)
+    if (document.visibilityState === 'hidden' && odUsable() && S.odState !== 'syncing' && audPendiente()) { clearTimeout(audSubidaTimer); syncDatos(); }
+    audVigilar();
+  });
+
   // Nombres de tareas de Todoist vistos en esta sesión (para describir cambios de tareas que ya no están)
   const nombresTareas = new Map();
   function recordarNombres() { for (const i of (S.data && S.data.items) || []) nombresTareas.set(i.id, cleanTitle(i.content)); }
@@ -2808,6 +2846,7 @@
 
   function applyView() {
     if (S.ui.view === 'cumpledias') S.ui.view = 'contactos'; // nombre anterior de la pantalla
+    if (S.ui.view !== 'auditoria') audVigilar();
     if (!VIEWS[S.ui.view]) S.ui.view = 'personal';
     const v = S.ui.view, cfg = VIEWS[v], board = !!cfg.board;
     if (board) document.getElementById('eyebrowSrc').textContent = cfg.board;
@@ -4796,6 +4835,7 @@
   };
   function renderAuditoria() {
     const root = document.getElementById('viewAuditoria');
+    setTimeout(audVigilar, 0);
     const todas = Object.values(S.datos.colecciones.auditoria || {});
     const hoy0 = new Date(); hoy0.setHours(0, 0, 0, 0);
     const sem = Date.now() - 7 * 86400000;
@@ -4865,11 +4905,12 @@
     }
     draw();
     const nota = h('p', { class: 'hint aud-nota' }, odConnected()
-      ? 'Se guardan los últimos ' + AUD_DIAS + ' días y se comparte entre tus dispositivos. Lo anterior se archiva solo en tu OneDrive, en la carpeta logs de la app (un fichero de texto por mes). Este dispositivo: ' + dispNombre() + '.'
+      ? 'Se guardan los últimos ' + AUD_DIAS + ' días y se comparte entre tus dispositivos: lo que se registra se sube solo y, con esta pantalla abierta, se actualiza cada 2 minutos. Lo anterior se archiva solo en tu OneDrive, en la carpeta logs de la app (un fichero de texto por mes). Este dispositivo: ' + dispNombre() + '.'
       : 'Sin OneDrive conectado, el historial se queda en este navegador y no se archiva. Este dispositivo: ' + dispNombre() + '.');
     root.replaceChildren(stats,
       h('section', { class: 'panel' },
-        h('div', { class: 'panel-head' }, search, dsel, count),
+        h('div', { class: 'panel-head' }, search, dsel, count,
+          odConnected() ? h('button', { type: 'button', class: 'btn ghost small', title: 'Lee y sube el historial de OneDrive (sin tocar lo demás)', onclick: () => audActualizar({ notify: true }) }, 'Actualizar') : null),
         h('div', { class: 'aud-filters' }, seg), chips, list, nota));
   }
   function exportarAuditoria() {
