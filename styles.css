@@ -650,3 +650,28 @@ a.btn { text-decoration: none; }
   .wk-ev { font-size: 14px; padding: 6px 9px; }
   .wk-time { font-size: 12px; }
 }
+
+/* Festivos */
+.cal-day.festivo { background: color-mix(in srgb, #E5534B 16%, var(--card)); border-color: color-mix(in srgb, #E5534B 45%, transparent); }
+.cal-day.festivo .cal-num { color: #F0857A; }
+.cal-day.festivo.out { background: color-mix(in srgb, #E5534B 8%, transparent); }
+.wk-day.festivo { background: color-mix(in srgb, #E5534B 13%, var(--card)); border-color: color-mix(in srgb, #E5534B 40%, transparent); }
+.wk-day.festivo .wk-num, .wk-day.festivo .wk-wd { color: #F0857A; }
+.wk-day.festivo.today .wk-num { color: var(--bg); }
+.festivos .fest-anio { display: flex; align-items: center; justify-content: center; gap: 12px; }
+.festivos .fest-anio h3 { margin: 0; min-width: 64px; text-align: center; font-size: 18px; color: var(--text); }
+.fest-cargar { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; padding: 10px 12px; border-radius: 10px; background: color-mix(in srgb, #E5534B 10%, var(--card)); }
+.fest-cargar .hint { margin: 0; }
+.fest-list { display: flex; flex-direction: column; gap: 4px; max-height: 50vh; overflow-y: auto; }
+.fest-row { display: grid; grid-template-columns: 92px minmax(0, 1fr) auto auto auto; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 8px; background: var(--card); border: 1px solid var(--line); }
+.fest-fecha { font-size: 12.5px; font-weight: 700; color: #F0857A; }
+.fest-nombre { font-size: 14px; color: var(--text); overflow-wrap: anywhere; }
+.fest-tipo { font-size: 11px; font-weight: 700; padding: 2px 7px; border-radius: 6px; background: rgba(255, 255, 255, 0.06); color: var(--text2); }
+.fest-tipo.t-empresa { background: rgba(127, 162, 224, 0.15); color: var(--blue); }
+.fest-form { display: flex; flex-direction: column; gap: 8px; padding: 10px; border-radius: 10px; border: 1px solid color-mix(in srgb, var(--blue) 45%, transparent); }
+.fest-campos { display: grid; grid-template-columns: 150px minmax(0, 1fr) 130px; gap: 6px; }
+@media (max-width: 560px) {
+  .fest-row { grid-template-columns: 72px minmax(0, 1fr) auto auto; }
+  .fest-tipo { display: none; }
+  .fest-campos { grid-template-columns: minmax(0, 1fr); }
+}
