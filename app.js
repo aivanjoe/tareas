@@ -1,4 +1,4 @@
-/* Mi panel
+/* Visir
    - Tareas y secciones: Todoist (API v1, endpoint /sync)
    - Datos propios de la app (etiquetas, ...): almacén local por colecciones,
      sincronizado con OneDrive personal (carpeta de la app) si el usuario lo conecta
@@ -1265,7 +1265,7 @@
     const out = new Map();
     const ev = (key, summary, date, extra) => out.set(key, Object.assign({
       summary, start: { date }, end: { date: addDays(date, 1) }, transparency: 'transparent',
-      description: 'Creado por Mi panel.', reminders: { useDefault: true },
+      description: 'Creado por Visir.', reminders: { useDefault: true },
       extendedProperties: { private: { mpApp: '1', mpKey: key } }
     }, extra));
     const today = todayUtc(), year = new Date(today).getUTCFullYear();
@@ -1288,7 +1288,7 @@
       if (!st.calendario || !st.personas.length) continue;
       ev('santo:' + st.clave, santoTitulo(st), year + '-' + (st.fecha === '02-29' && !isLeap(year) ? '02-28' : st.fecha), {
         recurrence: [st.fecha === '02-29' ? 'RRULE:FREQ=YEARLY;BYMONTH=2;BYMONTHDAY=-1' : 'RRULE:FREQ=YEARLY'], colorId: '3',
-        description: 'Lo celebran: ' + st.personas.map(shortName).join(', ') + '.\nCreado por Mi panel.'
+        description: 'Lo celebran: ' + st.personas.map(shortName).join(', ') + '.\nCreado por Visir.'
       });
     }
     // Gastos marcados para el calendario (activos)
@@ -2427,7 +2427,7 @@
     const exportData = () => {
       const blob = new Blob([JSON.stringify({ app: 'mi-panel', version: 2, exportedAt: new Date().toISOString(), datos: S.datos }, null, 2)], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
-      const a = h('a', { href: url, download: 'mi-panel-datos.json' });
+      const a = h('a', { href: url, download: 'visir-datos.json' });
       document.body.append(a);
       a.click();
       a.remove();

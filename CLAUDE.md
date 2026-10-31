@@ -1,4 +1,4 @@
-# CLAUDE.md — Mi panel
+# CLAUDE.md — Visir
 
 Contexto del proyecto para Claude Code. Léelo entero antes de tocar nada y mantenlo actualizado: cuando se tome una decisión nueva o cambie una existente, actualiza este fichero en el mismo commit.
 
@@ -13,6 +13,8 @@ Este repositorio es **público**. Nunca añadas al repositorio, ni en código ni
 Cualquier identificador que la app necesite (token de Todoist, Client ID de Microsoft, Client ID de Google) lo introduce el usuario en la pantalla de Ajustes y se guarda en el navegador, nunca en el código. Si una tarea parece requerir lo contrario, para y pregunta.
 
 ## Qué es
+
+**Visir** ("guía" o "señal" en islandés; antes "Mi panel"). El nombre se ve en la pestaña y bajo el logo de la barra lateral (`.brand-name`, en mayúsculas espaciadas). Los identificadores internos siguen como estaban para no romper datos: claves `mp.*`, `app: 'mi-panel'` en `datos.json` de OneDrive y en el fichero exportado (que ahora se descarga como `visir-datos.json`). Los eventos de la app llevan en la descripción "Creado por Visir.".
 
 Panel personal de tareas, en modo oscuro y muy visual, que centraliza en un solo sitio:
 
