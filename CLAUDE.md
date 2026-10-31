@@ -18,7 +18,7 @@ Panel personal de tareas, en modo oscuro y muy visual, que centraliza en un solo
 
 - **Personal**: tareas de Todoist (plan gratuito).
 - **Trabajo**: tareas de Microsoft Planner (el plan "Tareas mías" del usuario en el tenant del trabajo).
-- **Calendario**: citas de Google Calendar. *Pendiente.*
+- **Calendario**: el calendario de Google elegido por el usuario, en vista de mes, donde la app crea además sus propios eventos.
 
 Encima de las tareas de origen, la app añade su propia capa: **etiquetas con nombre y color**, filtros y una vista de tablero cómoda. Se usa desde el PC del trabajo, el PC de casa y un iPad, siempre por navegador.
 
@@ -47,7 +47,8 @@ Encima de las tareas de origen, la app añade su propia capa: **etiquetas con no
 | `mp.datos.base` | Última versión sincronizada con OneDrive (base de la fusión) |
 | `mp.onedrive` | `{ clientId, account, etag, syncedAt }` |
 | `mp.planner` | `{ account, plans, planId, buckets, tasks, cats: { [planId]: {etag, names} }, syncedAt }` (copia de Planner) |
-| `mp.google` | `{ clientId, account, token, exp, syncedAt }` (token de acceso de Google, dura una hora) |
+| `mp.google` | `{ clientId, account, token, exp, syncedAt, write, cal }` (token de acceso de Google, dura una hora; `write`/`cal`: si el permiso concedido permite editar contactos / usar Calendar) |
+| `mp.calendar` | `{ events, from, to, syncedAt }` (copia de los eventos leídos del calendario para la vista de mes) |
 | `msal.*` | Caché de sesión de MSAL (la gestiona la librería) |
 | `mp.ui` | Preferencias de interfaz (`sidebarHidden`, `projectId`) |
 
@@ -82,6 +83,19 @@ Encima de las tareas de origen, la app añade su propia capa: **etiquetas con no
 - **Cuándo:** al volver del login, con «Actualizar contactos» (va a Google si el permiso caducó) y al pulsar Sincronizar **solo si el permiso sigue vigente** (Sincronizar nunca saca de la página).
 - Borrar un contacto se confirma y recuerda que Google Contactos permite "Deshacer cambios" hasta 30 días.
 
+## Calendario: Google Calendar (hecho)
+
+- Mismo proyecto de Google y mismo login que los contactos, con los permisos `calendar.events` y `calendar.calendarlist.readonly` (añadidos en Acceso a datos; Google Calendar API activada). Con un permiso antiguo sin Calendar, la pantalla ofrece "Dar permiso" (login con `prompt=consent`).
+- **Calendario elegido** en Ajustes → Google (lista de calendarios en los que se puede escribir); se guarda en el almacén (colección `ajustes`, registro `calendario`: `{calendarId, nombre, color}`), así vale para todos los dispositivos. Su nombre no va en el código.
+- **Eventos de la app**, marcados con `extendedProperties.private { mpApp: '1', mpKey }`, de todo el día, transparentes y con los avisos por defecto del calendario (`reminders.useDefault`):
+  - `cumple:<contacto>`: cumpleaños anual (`RRULE:FREQ=YEARLY`; los del 29-F, `BYMONTH=2;BYMONTHDAY=-1`) de los contactos seguidos en Cumples, desde su fecha de nacimiento (o el año actual si no tiene año). Color 4.
+  - `dias:<contacto>:<N>`: los dos próximos cumpledías especiales (múltiplos de 5.000 días). Color 6.
+  - `gasto:<gasto>`: gastos activos con la casilla "Mostrar en el calendario", "Concepto · importe", repetido según sus meses y día (`FREQ=MONTHLY;BYMONTH=…;BYMONTHDAY=d`; si el día es 29-31, `BYMONTHDAY=28..d;BYSETPOS=-1` para caer en el último día de los meses cortos). Color 5.
+  - `tarea:<tarea>`: tareas de Personal con "Fecha en el calendario" (colección `fechasTareas`: `{id: taskId, fecha}`), con el nombre de la tarea. Al completar la tarea se borra la fecha (y el evento); deshacer la recupera. No toca la fecha de Todoist. Color 2.
+- **Puesta al día (`calReconcile`)**: lee los eventos con la marca de la app, crea los que faltan, cambia los que no coinciden (título, fechas, repetición, color) y borra los que sobran. **La app manda sobre sus eventos**: si se mueven o borran en Google, vuelven. Nunca toca los demás eventos. Sin datos de Todoist cargados no toca los eventos de tareas.
+- **Cuándo:** al pulsar Sincronizar (si el permiso de Google sigue vigente), al volver del login de Google, al elegir calendario y ~2,5 s después de cada cambio en el almacén (`saveDatos`) o al renombrar una tarea.
+- **Pantalla Calendario** (antetítulo: el nombre del calendario; botón principal "Hoy"): vista de mes (lunes a domingo) con los eventos de cada día (en el móvil, puntos de color) y, debajo, la lista del día elegido con hora y enlace a Google Calendar. Colores: cumpleaños rosa, cumpledías ámbar, gastos amarillo, tareas lima y el resto con el color del calendario. Al sincronizar se leen desde dos meses antes hasta un año después; al ir a un mes fuera de ese tramo se lee si el permiso sigue vigente.
+
 ## Integración con Todoist (hecha)
 
 - API v1, endpoint único `https://api.todoist.com/api/v1/sync`, autenticación `Authorization: Bearer <token>`, cuerpo `application/x-www-form-urlencoded`.
@@ -104,7 +118,7 @@ Encima de las tareas de origen, la app añade su propia capa: **etiquetas con no
 - **Etiquetas de Personal:** gestor propio (nombre + color, sin iconos, ordenables), en Ajustes y en la bandeja. Varias por tarea. Son solo de la app, no se escriben en Todoist. **Trabajo usa las etiquetas de Planner** (ver arriba), no estas.
 - **Asignar etiqueta:** arrastrándola desde la bandeja superior hasta la tarjeta. Pulsar una etiqueta de la bandeja filtra el tablero.
 - **Quitar etiquetas:** desde el panel de la tarea, no arrastrando.
-- **Añadir/editar tarea:** panel sencillo con nombre y etiquetas. "Añadir tarea" al pie de cada columna crea en esa columna; el botón de la cabecera permite elegir columna.
+- **Añadir/editar tarea:** panel sencillo con nombre, etiquetas y, en Personal, "Fecha en el calendario" (la tarjeta muestra un icono de calendario si la tiene). "Añadir tarea" al pie de cada columna crea en esa columna; el botón de la cabecera permite elegir columna.
 - **Menú lateral estrecho y ocultable** (preferencia recordada por navegador): 140 px (el logo de 88 px con aire alrededor), sin desplazamiento vertical desde 600 px de alto (por debajo de 720 px de alto pasa a una versión compacta, con el logo de 64 px); las etiquetas de tareas se gestionan desde Ajustes ("Gestionar etiquetas") y desde la bandeja del tablero, no desde el menú. Con el logo arriba, cada opción como icono con su nombre en pequeño debajo, sin contadores y el botón de ocultar al pie. En pantallas medianas y pequeñas pasa a ser un panel flotante.
 - **Adaptable:** columnas que se reparten el ancho (mínimo 300 px), desplazamiento horizontal si no caben; en pantallas pequeñas una columna por pantalla con encaje al desplazar. En iPad, arrastrar tarjetas requiere mantener pulsado un instante.
 - **Comentarios de Todoist:** se ven en el panel de la tarea (del más antiguo al más reciente, texto plano con saltos de línea; los adjuntos como enlace). Se pueden añadir, editar y borrar, y se guardan en Todoist al momento, aparte del botón Guardar. Si una tarea tiene comentarios, su tarjeta muestra un icono de bocadillo a la derecha del nombre (sin número).
@@ -157,5 +171,4 @@ La App Registration ya existe (tipo SPA, cuentas de cualquier organización y pe
 
 1. **Bloques traídos de un portal anterior del usuario** (hechos: Cumpledías, en la pantalla Contactos; Gastos y pagos; y Consumos) (web con servidor propio), rehechos con el estilo y la arquitectura de esta app. Cada uno es una colección del almacén y una pantalla en la barra lateral. Los datos reales se importan con un fichero generado fuera del repo; nunca se suben aquí.
    - **Inversiones:** precios y gráficas de mercado. BTC y ETH con datos públicos de Binance; SPY necesita un proveedor que admita llamadas desde el navegador, con clave gratuita introducida en Ajustes.
-2. **Calendario: Google Calendar.** Pantalla propia con vista de calendario (por definir). Mismo proyecto de Google y mismo login por redirección que los contactos, añadiendo el permiso de Calendar.
-3. Más adelante: elementos propios de la app (pagos recurrentes, cumpleaños, recordatorios) y captura rápida de tareas.
+2. Más adelante: elementos propios de la app (pagos recurrentes, cumpleaños, recordatorios) y captura rápida de tareas.

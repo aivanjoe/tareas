@@ -31,6 +31,7 @@
     onedrive: 'mp.onedrive',
     google: 'mp.google',
     planner: 'mp.planner',
+    calendar: 'mp.calendar',
     ui: 'mp.ui'
   };
   const LEGACY_TAGS_KEY = 'mp.tags'; // formato anterior de las etiquetas, se migra al almacén
@@ -67,6 +68,8 @@
     gg: Object.assign({ clientId: '', account: '', token: null, exp: 0, syncedAt: null }, store.get(KEYS.google, {})),
     pl: Object.assign({ account: '', plans: [], planId: null, buckets: [], tasks: null, cats: {}, syncedAt: null }, store.get(KEYS.planner, {})),
     plState: 'idle', // idle | syncing | login | error
+    cal: Object.assign({ events: [], from: null, to: null, syncedAt: null }, store.get(KEYS.calendar, {})),
+    calState: 'idle', // idle | syncing | error
     ggState: 'idle', // idle | syncing | login | error
     ui: Object.assign({ sidebarHidden: false, projectId: null, view: 'personal' }, store.get(KEYS.ui, {})),
     filter: new Set(),
@@ -174,7 +177,7 @@
     return out;
   }
 
-  const saveDatos = () => { store.set(KEYS.datos, S.datos); odSchedulePush(); };
+  const saveDatos = () => { store.set(KEYS.datos, S.datos); odSchedulePush(); calSchedule(); };
   const saveOd = () => store.set(KEYS.onedrive, S.od);
   const saveTags = () => {
     writeTags(S.datos, S.tags);
@@ -239,6 +242,9 @@
     edit: () => svg([{ d: 'M4 20h4L19 9l-4-4L4 16v4zM13.5 6.5l4 4' }]),
     file: () => svg([{ d: 'M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z' }, { d: 'M14 3v5h5M9 13h6M9 17h4' }]),
     check: () => svg([{ d: 'M5 12l5 5 9-10' }]),
+    calendar: () => svg([{ tag: 'rect', x: '3', y: '5', width: '18', height: '16', rx: '2' }, { d: 'M16 3v4M8 3v4M3 10h18' }]),
+    left: () => svg([{ d: 'M15 6l-6 6 6 6' }]),
+    right: () => svg([{ d: 'M9 6l6 6-6 6' }]),
     cake: () => svg([{ d: 'M4 21h16M5 21v-6a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v6M5 17c1.5 1 3 1 4.5 0s3-1 4.5 0 3 1 5 0M12 13V9' }]),
     comment: () => svg([{ d: 'M20 11.5a7.5 7.5 0 0 1-10.9 6.7L4 19.5l1.3-4.6A7.5 7.5 0 1 1 20 11.5z' }]),
     tag: () => svg([{ d: 'M20.6 13.4l-7.2 7.2a2 2 0 0 1-2.8 0L3 13V3h10l7.6 7.6a2 2 0 0 1 0 2.8z' }, { tag: 'circle', cx: '7.5', cy: '7.5', r: '1.5' }]),
@@ -923,7 +929,7 @@
   // ---------- Google (contactos: lectura y escritura) ----------
   // OAuth 2.0 para aplicaciones de navegador (flujo implícito) por redirección: la página va a Google
   // y vuelve con un token de acceso de una hora en el fragmento de la dirección. Sin librerías de Google.
-  const GG_SCOPES = 'https://www.googleapis.com/auth/contacts email';
+  const GG_SCOPES = 'https://www.googleapis.com/auth/contacts https://www.googleapis.com/auth/calendar.events https://www.googleapis.com/auth/calendar.calendarlist.readonly email';
   const GG_STATE = 'mp.google.state';
   const GG_NEXT = 'mp.google.next'; // qué hacer al volver de Google: { edit: id|null, draft }
   const PERSON_FIELDS = 'names,emailAddresses,phoneNumbers,birthdays,biographies,memberships,addresses,organizations';
@@ -967,6 +973,7 @@
       return;
     }
     S.gg.write = /auth\/contacts(\s|$)/.test(scope);
+    S.gg.cal = /auth\/calendar\.events(\s|$)/.test(scope) && /calendar\.calendarlist/.test(scope);
     S.gg.token = q.get('access_token');
     S.gg.exp = Date.now() + (parseInt(q.get('expires_in'), 10) || 3600) * 1000;
     saveGg();
@@ -987,6 +994,8 @@
     try { next = JSON.parse(sessionStorage.getItem(GG_NEXT) || 'null'); } catch (e) { /* nada */ }
     sessionStorage.removeItem(GG_NEXT);
     await syncContactos();
+    applyView();
+    calSync();
     if (next && 'edit' in next) {
       if (!S.gg.write) { toast('Para editar hay que marcar el permiso de editar contactos en Google.', 'error', { label: 'Volver a pedir', fn: () => ggLogin(true) }, 15000); return; }
       if (S.ui.view !== 'contactos') showView('contactos');
@@ -1027,6 +1036,9 @@
     try { data = await r.json(); } catch (e) { /* sin cuerpo */ }
     if (r.ok) return data || {};
     const msg = (data && data.error && (data.error.message || data.error.status)) || '';
+    const esCal = url.includes('/calendar/');
+    if (r.status === 403 && esCal && /insufficient|scope|PERMISSION/i.test(msg)) { S.gg.cal = false; saveGg(); throw new GgError('scope', 'Google no deja usar el calendario con el permiso actual.'); }
+    if (r.status === 403 && esCal) throw new GgError('http', 'Google Calendar no responde (403). Revisa que la Google Calendar API esté activada en tu proyecto.' + (msg ? ' ' + msg : ''));
     if (r.status === 403 && method !== 'GET') { S.gg.write = false; saveGg(); throw new GgError('scope', 'Google no deja modificar tus contactos con el permiso actual.'); }
     if (r.status === 403) throw new GgError('http', 'Google no deja leer los contactos (403). Revisa que la People API esté activada en tu proyecto.');
     if (r.status === 400 && /etag|FAILED_PRECONDITION|out of date/i.test(msg)) throw new GgError('conflict', 'Este contacto ha cambiado en Google mientras lo editabas.');
@@ -1100,7 +1112,7 @@
       S.gg.syncedAt = Date.now();
       saveGg();
       S.ggState = 'idle';
-      if (S.ui.view === 'contactos') applyView();
+      if (S.ui.view === 'contactos' || S.ui.view === 'calendario') applyView();
       if (opts.notify) toast(Object.keys(recs).length + ' contactos actualizados desde Google');
     } catch (e) {
       S.ggState = e.kind === 'login' ? 'login' : 'error';
@@ -1193,6 +1205,157 @@
     else ggLogin();
   }
 
+  // ---------- Calendario (Google Calendar) ----------
+  // Mismo login de Google. El calendario elegido se guarda en el almacén (colección "ajustes",
+  // registro "calendario"). La app crea y mantiene sus propios eventos, marcados con
+  // extendedProperties.private { mpApp: '1', mpKey }: cumpleaños, cumpledías especiales,
+  // gastos marcados y tareas de Personal con fecha. Los demás eventos solo se leen.
+  const CALAPI = 'https://www.googleapis.com/calendar/v3/';
+  const calCfg = () => ((S.datos.colecciones.ajustes || {}).calendario) || null;
+  const calReady = () => ggConnected() && !!S.gg.cal && !!calCfg();
+  const saveCal = () => store.set(KEYS.calendar, S.cal);
+  const ymdOf = t => new Date(t).toISOString().slice(0, 10);
+  const addDays = (ymd, n) => ymdOf(utcDay(ymd) + n * DAY);
+  let calTimer = null;
+
+  async function calList() {
+    const r = await ggGet(CALAPI + 'users/me/calendarList?minAccessRole=writer&maxResults=250');
+    return (r.items || []).map(c => ({ id: c.id, nombre: c.summaryOverride || c.summary, color: c.backgroundColor, primary: !!c.primary }));
+  }
+
+  // Regla de repetición de un gasto: meses de cobro y día (el 29-31 pasa al último día si el mes es más corto)
+  function gastoRRule(g) {
+    const meses = (Array.isArray(g.meses) && g.meses.length ? g.meses : mesesPara(g.periodicidad, 1)).slice().sort((a, b) => a - b).join(',');
+    const d = g.dia || 1;
+    if (d <= 28) return 'RRULE:FREQ=MONTHLY;BYMONTH=' + meses + ';BYMONTHDAY=' + d;
+    const dias = []; for (let i = 28; i <= d; i++) dias.push(i);
+    return 'RRULE:FREQ=MONTHLY;BYMONTH=' + meses + ';BYMONTHDAY=' + dias.join(',') + ';BYSETPOS=-1';
+  }
+
+  // Eventos que la app debe tener en el calendario, por clave
+  function calDesired() {
+    const out = new Map();
+    const ev = (key, summary, date, extra) => out.set(key, Object.assign({
+      summary, start: { date }, end: { date: addDays(date, 1) }, transparency: 'transparent',
+      description: 'Creado por Mi panel.', reminders: { useDefault: true },
+      extendedProperties: { private: { mpApp: '1', mpKey: key } }
+    }, extra));
+    const today = todayUtc(), year = new Date(today).getUTCFullYear();
+    // Cumpleaños y cumpledías especiales (múltiplos de 5.000 días) de los contactos seguidos
+    for (const c of contactos()) {
+      if (!cdMarked(c.id) || !c.cumple) continue;
+      const full = /^\d{4}/.test(c.cumple);
+      const mmdd = c.cumple.slice(-5);
+      const start = full ? c.cumple : year + '-' + (mmdd === '02-29' && !isLeap(year) ? '02-28' : mmdd);
+      ev('cumple:' + c.id, 'Cumpleaños de ' + c.nombre, start, {
+        recurrence: [mmdd === '02-29' ? 'RRULE:FREQ=YEARLY;BYMONTH=2;BYMONTHDAY=-1' : 'RRULE:FREQ=YEARLY'], colorId: '4'
+      });
+      if (!full) continue;
+      const birth = utcDay(c.cumple), lived = Math.round((today - birth) / DAY);
+      let k = Math.max(5000, Math.ceil(lived / 5000) * 5000);
+      for (let i = 0; i < 2; i++, k += 5000) ev('dias:' + c.id + ':' + k, c.nombre + ' cumple ' + fmtNum(k) + ' días', ymdOf(birth + k * DAY), { colorId: '6' });
+    }
+    // Gastos marcados para el calendario (activos)
+    for (const g of gastos()) {
+      if (!g.calendario || g.activo === false) continue;
+      const first = vencimientos(g, year, year + 1)[0];
+      if (first === undefined) continue;
+      ev('gasto:' + g.id, g.concepto + ' · ' + fmtEur(g.importe), ymdOf(first), { recurrence: [gastoRRule(g)], colorId: '5' });
+    }
+    // Tareas de Personal con fecha (solo si la tarea sigue en Todoist)
+    for (const f of Object.values(S.datos.colecciones.fechasTareas || {})) {
+      const t = S.data && S.data.items.find(i => i.id === f.id);
+      if (t && isYmd(f.fecha)) ev('tarea:' + f.id, cleanTitle(t.content), f.fecha, { colorId: '2' });
+    }
+    return out;
+  }
+
+  const calSame = (e, d) => e.summary === d.summary && (e.start || {}).date === d.start.date && (e.end || {}).date === d.end.date &&
+    (e.recurrence || []).join() === (d.recurrence || []).join() && (e.colorId || '') === (d.colorId || '');
+
+  // Deja los eventos de la app como mandan los datos: crea, cambia o borra solo los suyos
+  async function calReconcile() {
+    const cid = encodeURIComponent(calCfg().calendarId);
+    const mine = [];
+    let page = '';
+    do {
+      const r = await ggGet(CALAPI + 'calendars/' + cid + '/events?privateExtendedProperty=' + encodeURIComponent('mpApp=1') + '&maxResults=2500' + (page ? '&pageToken=' + encodeURIComponent(page) : ''));
+      mine.push(...(r.items || []));
+      page = r.nextPageToken || '';
+    } while (page);
+    const want = calDesired();
+    const seen = new Set();
+    let cambios = 0;
+    for (const e of mine) {
+      const key = ((e.extendedProperties || {}).private || {}).mpKey;
+      // Sin datos de Todoist cargados no se tocan los eventos de tareas
+      if (key && key.startsWith('tarea:') && !S.data) { seen.add(key); continue; }
+      const d = want.get(key);
+      if (!d || seen.has(key)) { await ggCall('DELETE', CALAPI + 'calendars/' + cid + '/events/' + encodeURIComponent(e.id)); cambios++; continue; }
+      seen.add(key);
+      if (!calSame(e, d)) { await ggCall('PUT', CALAPI + 'calendars/' + cid + '/events/' + encodeURIComponent(e.id), d); cambios++; }
+    }
+    for (const [key, d] of want) if (!seen.has(key)) { await ggCall('POST', CALAPI + 'calendars/' + cid + '/events', d); cambios++; }
+    return cambios;
+  }
+
+  // Lee los eventos (todos, ya desplegados) de un intervalo de días para la vista de mes
+  async function calFetch(fromYmd, toYmd) {
+    const cid = encodeURIComponent(calCfg().calendarId);
+    const items = [];
+    let page = '';
+    do {
+      const r = await ggGet(CALAPI + 'calendars/' + cid + '/events?singleEvents=true&orderBy=startTime&maxResults=2500&timeMin=' + encodeURIComponent(fromYmd + 'T00:00:00Z') + '&timeMax=' + encodeURIComponent(toYmd + 'T00:00:00Z') + (page ? '&pageToken=' + encodeURIComponent(page) : ''));
+      items.push(...(r.items || []));
+      page = r.nextPageToken || '';
+    } while (page);
+    const evs = items.filter(e => e.status !== 'cancelled').map(e => ({
+      id: e.id, title: e.summary || '(sin título)', allDay: !!(e.start && e.start.date),
+      start: (e.start && (e.start.date || e.start.dateTime)) || '', end: (e.end && (e.end.date || e.end.dateTime)) || '',
+      key: ((e.extendedProperties || {}).private || {}).mpKey || '', link: e.htmlLink || ''
+    }));
+    // Se sustituye lo leído en ese intervalo y se conserva el resto
+    const inRange = e => e.start.slice(0, 10) >= fromYmd && e.start.slice(0, 10) < toYmd;
+    S.cal.events = S.cal.events.filter(e => !inRange(e)).concat(evs);
+    S.cal.from = S.cal.from && S.cal.from < fromYmd ? S.cal.from : fromYmd;
+    S.cal.to = S.cal.to && S.cal.to > toYmd ? S.cal.to : toYmd;
+    saveCal();
+  }
+
+  async function calSync(opts = {}) {
+    if (!calReady() || !ggTokenOk() || S.calState === 'syncing') return;
+    clearTimeout(calTimer);
+    S.calState = 'syncing';
+    renderSyncState();
+    try {
+      const cambios = await calReconcile();
+      const t = new Date(todayUtc());
+      const from = ymdOf(Date.UTC(t.getUTCFullYear(), t.getUTCMonth() - 2, 1));
+      const to = ymdOf(Date.UTC(t.getUTCFullYear(), t.getUTCMonth() + 13, 1));
+      S.cal.events = [];
+      await calFetch(from, to);
+      S.cal.syncedAt = Date.now();
+      saveCal();
+      S.calState = 'idle';
+      if (opts.notify) toast('Calendario sincronizado' + (cambios ? ' (' + cambios + (cambios === 1 ? ' cambio)' : ' cambios)') : ''));
+    } catch (e) {
+      S.calState = 'error';
+      if (e.kind === 'login') { S.calState = 'idle'; toast(e.message, 'error', { label: 'Conectar', fn: ggLogin }, 10000); }
+      else if (e.kind === 'scope') toast(e.message, 'error', { label: 'Dar permiso', fn: () => ggLogin(true) }, 15000);
+      else toast(e.message || 'Error con Google Calendar.', 'error');
+    } finally {
+      renderSyncState();
+      if (S.ui.view === 'calendario') renderCal();
+    }
+  }
+
+  // Tras un cambio en datos que afectan al calendario, se pone al día al poco (si el permiso sigue vigente)
+  function calSchedule() {
+    if (!calReady() || !ggTokenOk()) return;
+    clearTimeout(calTimer);
+    calTimer = setTimeout(() => calSync(), 2500);
+  }
+
   // ---------- datos derivados ----------
   function currentProjectId() {
     if (!S.data) return null;
@@ -1265,14 +1428,15 @@
   // Cabecera: cuándo se sincronizó la fuente de esta pantalla y, si alguna conexión necesita
   // atención (reconectar o error), un aviso que se puede pulsar
   function renderSyncState() {
-    const busy = S.syncing || S.odState === 'syncing' || S.plState === 'syncing' || S.ggState === 'syncing';
+    const busy = S.syncing || S.odState === 'syncing' || S.plState === 'syncing' || S.ggState === 'syncing' || S.calState === 'syncing';
     const v = S.ui.view;
-    const ts = v === 'trabajo' ? S.pl.syncedAt : v === 'personal' ? (S.data && S.data.syncedAt) : v === 'contactos' ? S.gg.syncedAt : S.od.syncedAt;
+    const ts = v === 'trabajo' ? S.pl.syncedAt : v === 'personal' ? (S.data && S.data.syncedAt) : v === 'contactos' ? S.gg.syncedAt : v === 'calendario' ? S.cal.syncedAt : S.od.syncedAt;
     document.getElementById('syncInfo').textContent = busy ? 'Sincronizando…' : ts ? 'Sincronizado ' + relTime(ts) : '';
     const warns = [];
     if (odConnected() && (S.odState === 'login' || S.odState === 'error')) warns.push(['OneDrive', S.odState, odConnect]);
     if (plConnected() && (S.plState === 'login' || S.plState === 'error')) warns.push(['Planner', S.plState, plConnect]);
     if (ggConnected() && S.ggState === 'error') warns.push(['Google', 'error', ggRefresh]);
+    if (calReady() && S.calState === 'error') warns.push(['Calendario', 'error', openSettings]);
     const w = document.getElementById('syncWarn');
     w.hidden = !warns.length;
     w.replaceChildren(...warns.map(([name, st, fn]) => h('button', { type: 'button', class: 'warn-pill', onclick: st === 'login' ? fn : openSettings, title: st === 'login' ? 'Pulsa para volver a conectar' : 'Revisa la conexión en Ajustes' },
@@ -1358,10 +1522,12 @@
     const pending = item.id.startsWith('tmp-');
     const work = isWork();
     const hasNotes = work ? item.hasDescription : (S.data.notes || []).some(n => n.item_id === item.id);
+    const hasFecha = !work && !!(S.datos.colecciones.fechasTareas || {})[item.id];
     const title = work ? item.title : cleanTitle(item.content);
     const notesLabel = work ? 'Tiene notas' : 'Tiene comentarios';
+    const fechaCal = !work && ((S.datos.colecciones.fechasTareas || {})[item.id] || {}).fecha;
     return h('div', {
-      class: 'card' + (pending ? ' pending' : '') + (hasNotes ? ' has-notes' : ''),
+      class: 'card' + (pending ? ' pending' : '') + (hasNotes || hasFecha ? ' has-notes' : ''),
       dataset: { taskId: item.id },
       style: '--strip:' + (tags[0] ? tags[0].color : 'transparent')
     },
@@ -1373,7 +1539,9 @@
         type: 'button', class: 'card-title', title,
         onclick: () => { if (!pending) openEdit(item.id); }
       }, title),
-      hasNotes ? h('span', { class: 'card-notes', title: notesLabel, 'aria-label': notesLabel }, ICON.comment()) : null,
+      hasNotes || fechaCal ? h('span', { class: 'card-notes' },
+        fechaCal ? h('span', { class: 'card-cal', title: 'En el calendario: ' + fmtDay(utcDay(fechaCal)), 'aria-label': 'En el calendario el ' + fmtDay(utcDay(fechaCal)) }, ICON.calendar()) : null,
+        hasNotes ? h('span', { title: notesLabel, 'aria-label': notesLabel }, ICON.comment()) : null) : null,
       tags.length ? h('span', { class: 'card-tags' },
         tags.map(t => h('span', { class: 'mini-tag', style: '--c:' + t.color }, t.name))) : null
     );
@@ -1421,6 +1589,9 @@
     if (idx < 0) return;
     const [item] = S.data.items.splice(idx, 1);
     saveCache();
+    // Si tenía fecha en el calendario, su evento se borra (se recupera al deshacer)
+    const fecha = !item.recurring && (S.datos.colecciones.fechasTareas || {})[id];
+    if (fecha) { const rest = Object.assign({}, S.datos.colecciones.fechasTareas); delete rest[id]; S.datos.colecciones.fechasTareas = rest; saveDatos(); item._fecha = fecha; }
     renderBoard();
     renderProjects();
     const undo = item.recurring ? null : { label: 'Deshacer', fn: () => undoComplete(item) };
@@ -1432,8 +1603,11 @@
   }
 
   async function undoComplete(item) {
+    const fecha = item._fecha;
+    delete item._fecha;
     S.data.items.push(item);
     saveCache();
+    if (fecha) { S.datos.colecciones.fechasTareas = Object.assign({}, S.datos.colecciones.fechasTareas, { [item.id]: fecha }); saveDatos(); }
     renderBoard();
     renderProjects();
     try { await runCommands([{ type: 'item_uncomplete', uuid: uid(), args: { id: item.id } }]); }
@@ -1515,7 +1689,7 @@
   // ---------- panel de tarea (nueva / editar) ----------
   function openNew(sectionKey, fromHeader) {
     if (!boardReady()) return;
-    S.editing = { mode: 'new', sectionKey, fromHeader, name: '', tagIds: [], work: isWork() };
+    S.editing = { mode: 'new', sectionKey, fromHeader, name: '', tagIds: [], work: isWork(), fecha: '' };
     renderDrawer();
   }
 
@@ -1523,7 +1697,8 @@
     const item = isWork() ? plTask(taskId) : S.data.items.find(i => i.id === taskId);
     if (!item) return;
     const name = isWork() ? item.title : item.content;
-    S.editing = { mode: 'edit', taskId, name, original: name, tagIds: assigned(taskId).slice(), work: isWork() };
+    const f = !isWork() && (S.datos.colecciones.fechasTareas || {})[taskId];
+    S.editing = { mode: 'edit', taskId, name, original: name, tagIds: assigned(taskId).slice(), work: isWork(), fecha: f ? f.fecha : '' };
     renderDrawer();
   }
 
@@ -1573,6 +1748,16 @@
     drawChips();
 
     const commentsField = ed.mode === 'edit' && !ed.taskId.startsWith('tmp-') ? (isWork() ? plNotesSection(ed) : commentsSection(ed.taskId)) : null;
+    // Fecha en el calendario (Personal): crea un evento de todo el día en Google Calendar
+    let fechaField = null;
+    if (!isWork()) {
+      const inp = h('input', { class: 'input', id: 'taskFecha', type: 'date', value: ed.fecha || '' });
+      inp.addEventListener('change', () => { ed.fecha = inp.value; });
+      fechaField = h('div', { class: 'field' },
+        h('label', { class: 'field-label', for: 'taskFecha' }, 'Fecha en el calendario'),
+        h('div', { class: 'row-edit two' }, inp, h('button', { type: 'button', class: 'btn subtle small', onclick: () => { inp.value = ''; ed.fecha = ''; } }, 'Quitar')),
+        h('p', { class: 'hint' }, calReady() ? 'Crea un evento con el nombre de la tarea en tu calendario. Al completar la tarea, el evento se borra.' : 'Se guardará y aparecerá en el calendario cuando conectes Google Calendar en Ajustes.'));
+    }
 
     let columnField = null;
     if (ed.mode === 'new' && ed.fromHeader) {
@@ -1597,6 +1782,7 @@
         tagList().length
           ? h('p', { class: 'hint' }, 'Pulsa una etiqueta para asignarla o quitarla.')
           : h('div', null, h('button', { type: 'button', class: 'btn ghost small', onclick: isWork() ? openPlLabels : openTagManager }, 'Crear etiquetas'))),
+      fechaField,
       commentsField,
       h('div', { class: 'drawer-foot' },
         ed.mode === 'edit'
@@ -1737,17 +1923,26 @@
     const tagIds = ed.tagIds.filter(id => tagById(id));
     closeDrawer();
     if (ed.work) return plSaveDrawer(ed, name, tagIds);
+    const setFecha = (id, fecha) => {
+      const cur = (S.datos.colecciones.fechasTareas || {})[id];
+      if ((cur ? cur.fecha : '') === (fecha || '')) return;
+      const rest = Object.assign({}, S.datos.colecciones.fechasTareas);
+      if (isYmd(fecha)) rest[id] = { id, fecha }; else delete rest[id];
+      S.datos.colecciones.fechasTareas = rest;
+      saveDatos();
+    };
 
     if (ed.mode === 'edit') {
       const item = S.data.items.find(i => i.id === ed.taskId);
       if (!item) return;
       S.tags.assign[ed.taskId] = tagIds;
       saveTags();
+      setFecha(ed.taskId, ed.fecha);
       const renamed = name !== ed.original.trim();
       if (renamed) { item.content = name; saveCache(); }
       renderBoard();
       if (renamed) {
-        try { await runCommands([{ type: 'item_update', uuid: uid(), args: { id: item.id, content: name } }]); }
+        try { await runCommands([{ type: 'item_update', uuid: uid(), args: { id: item.id, content: name } }]); calSchedule(); }
         catch (e) { await recover(e); }
       }
       return;
@@ -1777,6 +1972,7 @@
       S.tags.assign[realId] = S.tags.assign[tempId] || [];
       delete S.tags.assign[tempId];
       saveTags();
+      if (isYmd(ed.fecha)) setFecha(realId, ed.fecha);
       saveCache();
       renderBoard();
     } catch (e) {
@@ -2099,7 +2295,7 @@
   function ggSection() {
     const box = h('div', { class: 'modal-section' });
     const draw = () => {
-      const intro = h('p', { class: 'muted' }, 'Lee tus contactos de Google (solo lectura): teléfonos, correos, cumpleaños, notas y categorías.');
+      const intro = h('p', { class: 'muted' }, 'Tus contactos (con sus teléfonos, correos, cumpleaños, notas y categorías) y tu calendario de Google.');
       if (!S.gg.clientId) {
         const input = h('input', { class: 'input', type: 'text', placeholder: 'ID de cliente de Google', autocomplete: 'off', spellcheck: 'false', 'aria-label': 'ID de cliente de Google' });
         const saveId = () => {
@@ -2131,9 +2327,14 @@
         return;
       }
       const n = Object.keys(S.datos.colecciones.contactos || {}).length;
+      const cal = calCfg();
+      const calLine = h('p', { class: 'muted' }, 'Calendario: ', cal ? h('strong', null, cal.nombre) : 'sin elegir', '. ',
+        !S.gg.cal ? h('button', { type: 'button', class: 'btn subtle small inline', onclick: () => ggLogin(true) }, 'Dar permiso de Calendar')
+          : h('button', { type: 'button', class: 'btn subtle small inline', onclick: openCalPicker }, cal ? 'Cambiar' : 'Elegir calendario'));
       box.replaceChildren(h('h3', null, 'Google'),
         h('p', { class: 'muted' }, 'Conectado como ', h('strong', null, S.gg.account), '.'),
         h('p', { class: 'muted' }, n + ' contactos · ' + (S.gg.syncedAt ? 'leídos ' + relTime(S.gg.syncedAt) : 'sin leer todavía') + '. El permiso de Google dura una hora; después, «Actualizar contactos» vuelve a pedirlo.'),
+        calLine,
         h('div', { class: 'row-actions' },
           h('button', { type: 'button', class: 'btn ghost small', onclick: ggRefresh }, 'Actualizar contactos'),
           h('button', {
@@ -2244,6 +2445,7 @@
   const VIEWS = {
     personal: { title: 'Personal', add: 'Añadir tarea', board: 'Todoist' },
     trabajo: { title: 'Trabajo', add: 'Añadir tarea', board: 'Planner' },
+    calendario: { title: 'Calendario', eyebrow: () => calCfg() ? calCfg().nombre : 'Google Calendar', add: 'Hoy', addIcon: 'calendar', el: 'viewCalendario', render: () => renderCal(), onAdd: () => { calMonth = null; calSel = null; renderCal(); } },
     contactos: { title: 'Contactos', eyebrow: 'Agenda y cumples', add: () => ctTab() === 'agenda' ? 'Nuevo contacto' : 'Elegir contactos', el: 'viewContactos', render: () => renderCumpledias(), onAdd: () => ctTab() === 'agenda' ? openEditContacto(null) : openCdPicker() },
     gastos: { title: 'Gastos', eyebrow: 'Pagos recurrentes', add: 'Nuevo gasto', el: 'viewGastos', render: () => renderGastos(), onAdd: () => openGasto(null) },
     consumos: { title: 'Consumos', eyebrow: 'Luz, gas y agua', add: 'Subir facturas', el: 'viewConsumos', render: () => renderConsumos(), onAdd: () => pickFacturas() }
@@ -2263,8 +2465,10 @@
     document.getElementById('eyebrowTodoist').hidden = !board;
     const eb = document.getElementById('eyebrowOther');
     eb.hidden = board;
-    eb.textContent = cfg.eyebrow || '';
+    eb.textContent = (typeof cfg.eyebrow === 'function' ? cfg.eyebrow() : cfg.eyebrow) || '';
     document.getElementById('addLabel').textContent = typeof cfg.add === 'function' ? cfg.add() : cfg.add;
+    const addBtn = document.getElementById('addBtn');
+    addBtn.querySelector('svg').replaceWith(ICON[cfg.addIcon || 'plus']());
     document.getElementById('tagbar').hidden = !board;
     document.getElementById('boardWrap').hidden = !board;
     for (const [k, c] of Object.entries(VIEWS)) if (c.el) document.getElementById(c.el).hidden = k !== v;
@@ -2278,6 +2482,118 @@
     saveUi();
     if (SMALL.matches) toggleSidebar(false);
     if (VIEWS[v] && VIEWS[v].board) renderAll(); else applyView();
+  }
+
+  // ---------- pantalla Calendario (vista de mes) ----------
+  let calMonth = null; // primer día del mes visible (ms UTC)
+  let calSel = null;   // día elegido (AAAA-MM-DD)
+  let calLoading = false;
+  const DIAS_SEM = ['L', 'M', 'X', 'J', 'V', 'S', 'D'];
+  const localYmd = d => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+
+  function evColor(e) {
+    const k = e.key || '';
+    if (k.startsWith('cumple:')) return '#E68AC4';
+    if (k.startsWith('dias:')) return '#F2B35B';
+    if (k.startsWith('tarea:')) return '#DBF266';
+    if (k.startsWith('gasto:')) return '#F5D76E';
+    const c = calCfg() && calCfg().color;
+    return isHex(c) ? c : '#7FA2E0';
+  }
+  const evOrigin = e => (e.key || '').startsWith('cumple:') ? 'Cumpleaños' : (e.key || '').startsWith('dias:') ? 'Cumpledías' : (e.key || '').startsWith('gasto:') ? 'Gasto' : (e.key || '').startsWith('tarea:') ? 'Tarea' : '';
+  // Día(s) de un evento: los de todo el día ocupan [inicio, fin); los de hora, su día local de inicio
+  function evOnDay(e, ymd) {
+    if (e.allDay) return e.start <= ymd && ymd < (e.end || addDays(e.start, 1));
+    return localYmd(new Date(e.start)) === ymd;
+  }
+  const evTime = e => e.allDay ? 'Todo el día' : new Date(e.start).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' });
+
+  function renderCal() {
+    const root = document.getElementById('viewCalendario');
+    root.dataset.day = String(todayUtc());
+    const box = (msg, label, fn) => root.replaceChildren(h('section', { class: 'panel' }, h('p', { class: 'muted empty-note' }, msg),
+      label ? h('div', { class: 'row-actions' }, h('button', { type: 'button', class: 'btn primary small', onclick: fn }, label)) : null));
+    if (!ggConnected()) return box('Conecta tu cuenta de Google en Ajustes para ver aquí tu calendario.', 'Ir a Ajustes', openSettings);
+    if (!S.gg.cal) return box('Falta el permiso de Google Calendar. Al pulsar, Google te pedirá aceptarlo (marca las casillas de Calendar).', 'Dar permiso', () => ggLogin(true));
+    if (!calCfg()) return box('Elige en Ajustes el calendario que quieres usar.', 'Elegir calendario', openCalPicker);
+
+    const today = ymdOf(todayUtc());
+    if (calMonth === null) { const t = new Date(todayUtc()); calMonth = Date.UTC(t.getUTCFullYear(), t.getUTCMonth(), 1); }
+    const m = new Date(calMonth), Y = m.getUTCFullYear(), M = m.getUTCMonth();
+    const first = ymdOf(calMonth), next = ymdOf(Date.UTC(Y, M + 1, 1));
+    if (!calSel || calSel.slice(0, 7) !== first.slice(0, 7)) calSel = today.slice(0, 7) === first.slice(0, 7) ? today : first;
+
+    // Mes fuera de lo ya leído: se lee si el permiso sigue vigente
+    if ((!S.cal.from || first < S.cal.from || next > S.cal.to) && ggTokenOk() && !calLoading) {
+      calLoading = true;
+      calFetch(ymdOf(Date.UTC(Y, M - 1, 1)), ymdOf(Date.UTC(Y, M + 2, 1)))
+        .catch(e => toast(e.message || 'No se pudo leer el calendario.', 'error'))
+        .finally(() => { calLoading = false; if (S.ui.view === 'calendario') renderCal(); });
+    }
+
+    const nav = h('div', { class: 'cal-nav' },
+      h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Mes anterior', onclick: () => { calMonth = Date.UTC(Y, M - 1, 1); renderCal(); } }, ICON.left()),
+      h('h2', null, cap(new Date(calMonth).toLocaleDateString('es-ES', { month: 'long', year: 'numeric', timeZone: 'UTC' }))),
+      h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Mes siguiente', onclick: () => { calMonth = Date.UTC(Y, M + 1, 1); renderCal(); } }, ICON.right()),
+      calLoading ? h('span', { class: 'muted' }, 'Leyendo…') : null,
+      h('div', { class: 'legend cal-legend' },
+        h('span', { class: 'lg', style: '--c:#E68AC4' }, 'Cumpleaños'), h('span', { class: 'lg', style: '--c:#F2B35B' }, 'Cumpledías'),
+        h('span', { class: 'lg', style: '--c:#F5D76E' }, 'Gastos'), h('span', { class: 'lg', style: '--c:#DBF266' }, 'Tareas')));
+
+    const grid = h('div', { class: 'cal-grid' }, DIAS_SEM.map(d => h('span', { class: 'cal-wd' }, d)));
+    const offset = (m.getUTCDay() + 6) % 7; // lunes = 0
+    const start = calMonth - offset * DAY;
+    const weeks = Math.ceil((offset + new Date(Date.UTC(Y, M + 1, 0)).getUTCDate()) / 7);
+    for (let i = 0; i < weeks * 7; i++) {
+      const ymd = ymdOf(start + i * DAY);
+      const evs = S.cal.events.filter(e => evOnDay(e, ymd));
+      const cell = h('button', {
+        type: 'button', class: 'cal-day' + (ymd.slice(0, 7) !== first.slice(0, 7) ? ' out' : '') + (ymd === today ? ' today' : '') + (ymd === calSel ? ' sel' : ''),
+        'aria-label': fmtDay(utcDay(ymd)) + (evs.length ? ', ' + evs.length + (evs.length === 1 ? ' evento' : ' eventos') : ''),
+        onclick: () => { calSel = ymd; if (ymd.slice(0, 7) !== first.slice(0, 7)) calMonth = Date.UTC(+ymd.slice(0, 4), +ymd.slice(5, 7) - 1, 1); renderCal(); }
+      },
+        h('span', { class: 'cal-num' }, String(+ymd.slice(8))),
+        h('span', { class: 'cal-evs' }, evs.slice(0, 3).map(e => h('span', { class: 'cal-ev', style: '--c:' + evColor(e) }, e.title)),
+          evs.length > 3 ? h('span', { class: 'cal-more' }, '+' + (evs.length - 3)) : null),
+        h('span', { class: 'cal-dots' }, evs.slice(0, 4).map(e => h('span', { class: 'cal-dot', style: '--c:' + evColor(e) }))));
+      grid.append(cell);
+    }
+
+    const dayEvs = S.cal.events.filter(e => evOnDay(e, calSel)).sort((a, b) => (a.allDay === b.allDay ? a.start.localeCompare(b.start) : a.allDay ? -1 : 1));
+    const list = h('div', { class: 'ev-list' }, dayEvs.map(e => h('a', { class: 'ev cal-item', href: e.link || '#', target: '_blank', rel: 'noopener noreferrer' },
+      h('span', { class: 'cat-dot', style: '--c:' + evColor(e) }),
+      h('span', { class: 'ev-main' }, h('span', { class: 'ev-name' }, e.title), h('span', { class: 'ev-what' }, [evTime(e), evOrigin(e) ? 'creado por la app (' + evOrigin(e).toLowerCase() + ')' : ''].filter(Boolean).join(' · '))))));
+    if (!dayEvs.length) list.append(h('p', { class: 'muted empty-note' }, 'Sin eventos este día.'));
+
+    root.replaceChildren(
+      h('section', { class: 'panel' }, nav, grid),
+      h('section', { class: 'panel' }, h('div', { class: 'panel-head' }, h('h2', null, cap(new Date(utcDay(calSel)).toLocaleDateString('es-ES', { weekday: 'long', day: 'numeric', month: 'long', timeZone: 'UTC' })))), list));
+  }
+
+  // Elegir el calendario de Google (se guarda en el almacén: vale para todos los dispositivos)
+  async function openCalPicker() {
+    if (!S.gg.cal) { ggLogin(true); return; }
+    if (!ggTokenOk()) { toast('El permiso de Google ha caducado: reconecta y vuelve a elegir.', 'error', { label: 'Conectar', fn: ggLogin }, 10000); return; }
+    let cals;
+    try { cals = await calList(); } catch (e) { toast(e.message, 'error'); return; }
+    if (!cals.length) { toast('No hay calendarios en los que puedas escribir.', 'error'); return; }
+    const cur = calCfg();
+    let close = null;
+    const list = h('div', { class: 'pick-list' }, cals.map(c => h('button', {
+      type: 'button', class: 'pick' + (cur && cur.calendarId === c.id ? ' on' : ''),
+      onclick: () => {
+        S.datos.colecciones.ajustes = Object.assign({}, S.datos.colecciones.ajustes, { calendario: { id: 'calendario', calendarId: c.id, nombre: c.nombre, color: isHex(c.color) ? c.color : null } });
+        S.cal = { events: [], from: null, to: null, syncedAt: null };
+        saveCal();
+        saveDatos();
+        close();
+        toast('Calendario: ' + c.nombre);
+        applyView();
+        calSync({ notify: true });
+      }
+    }, h('span', { class: 'pick-box', style: isHex(c.color) ? 'background:' + c.color + ';border-color:' + c.color : '' }), h('span', { class: 'ev-main' }, h('span', { class: 'ev-name' }, c.nombre), h('span', { class: 'ev-what' }, c.primary ? 'Calendario principal' : '')))));
+    close = openModal('Elige el calendario', h('div', { class: 'form' },
+      h('p', { class: 'hint' }, 'La app leerá sus eventos y creará en él los suyos: cumpleaños y cumpledías especiales de los contactos que sigues, los gastos marcados y las tareas con fecha.'), list));
   }
 
   // ---------- contactos: cumpledías y cumpleaños ----------
@@ -3139,6 +3455,7 @@
     const notas = h('textarea', { class: 'input textarea', id: 'gNotas', rows: '2', maxlength: '500' });
     notas.value = cur ? cur.notas || '' : '';
     const pausado = h('input', { type: 'checkbox', id: 'gPausado', checked: cur ? cur.activo === false : false });
+    const enCal = h('input', { type: 'checkbox', id: 'gCal', checked: cur ? !!cur.calendario : false });
 
     const mesesBox = h('div', { class: 'months' });
     const drawMeses = () => mesesBox.replaceChildren(...MESES_CORTOS.map((n, i) => {
@@ -3172,7 +3489,7 @@
         id: cur ? cur.id : 'g-' + uid(), concepto: c, proveedor: proveedor.value.trim(), categoria: categoria.value,
         importe: Math.round(imp * 100) / 100, periodicidad: st.periodicidad, meses: st.meses.slice(), dia: d,
         proximoPago: isYmd(proximo.value) ? proximo.value : null, cobro: st.cobro, notas: notas.value.trim(),
-        activo: !pausado.checked
+        activo: !pausado.checked, calendario: enCal.checked
       });
       if (!cur) rec.creado = Date.now();
       putRecord('gastos', rec);
@@ -3189,6 +3506,7 @@
       field('Próximo pago fijo', 'gProximo', proximo, 'Opcional. Úsalo si te han cambiado la fecha de cobro; deja de aplicarse al registrar el pago.'),
       h('div', { class: 'form-row' }, field('Proveedor', 'gProveedor', proveedor), h('div', { class: 'field' }, h('span', { class: 'field-label' }, 'Cobro'), cobroSeg)),
       field('Notas', 'gNotas', notas),
+      h('label', { class: 'check-line', for: 'gCal' }, enCal, 'Mostrar en el calendario (un evento en cada vencimiento)'),
       h('label', { class: 'check-line', for: 'gPausado' }, pausado, 'Pausado (no cuenta en vencimientos ni totales)'),
       h('div', { class: 'row-actions modal-foot' },
         cur ? h('button', {
@@ -3666,7 +3984,7 @@
       if (odConnected() && S.odState === 'login') odConnect();
       else syncDatos();
       // Contactos de Google: solo si el permiso sigue vigente (no se sale de la página sin pedirlo)
-      if (ggConnected() && ggTokenOk()) syncContactos();
+      if (ggConnected() && ggTokenOk()) syncContactos().then(() => calSync({ notify: S.ui.view === 'calendario' }));
       // Planner: si la sesión del trabajo caducó, este clic lleva a reconectar
       if (plConnected()) { if (S.plState === 'login') plConnect(); else plSync(); }
       doSync();
