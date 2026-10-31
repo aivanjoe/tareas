@@ -5,12 +5,12 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#0B0F15">
   <title>Mi panel</title>
-  <link rel="icon" type="image/svg+xml" href="favicon.svg?v=13">
-  <link rel="apple-touch-icon" href="apple-touch-icon.png?v=13">
+  <link rel="icon" type="image/svg+xml" href="favicon.svg?v=14">
+  <link rel="apple-touch-icon" href="apple-touch-icon.png?v=14">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="styles.css?v=13">
+  <link rel="stylesheet" href="styles.css?v=14">
 </head>
 <body>
   <div class="app" id="app">
@@ -35,9 +35,9 @@
           <svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M16 3v4M8 3v4M3 10h18"/></svg>
           <span class="nav-label">Calendario</span>
         </span>
-        <a href="#" class="nav-item" data-view="cumpledias">
-          <svg viewBox="0 0 24 24"><path d="M4 21h16M5 21v-6a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v6M5 17c1.5 1 3 1 4.5 0s3-1 4.5 0 3 1 5 0M12 13V9M12 3.8c1 1 1.2 2 0 3.2-1.2-1.2-1-2.2 0-3.2z"/></svg>
-          <span class="nav-label">Cumpledías</span>
+        <a href="#" class="nav-item" data-view="contactos">
+          <svg viewBox="0 0 24 24"><rect x="5" y="3" width="15" height="18" rx="2"/><path d="M3 8h4M3 12h4M3 16h4"/><circle cx="12.5" cy="10" r="2.5"/><path d="M8.5 17c.6-2 2.2-3 4-3s3.4 1 4 3"/></svg>
+          <span class="nav-label">Contactos</span>
         </a>
       </nav>
 
@@ -99,7 +99,7 @@
         <div class="board" id="board"></div>
       </div>
 
-      <section class="view" id="viewCumpledias" aria-label="Cumpledías" hidden></section>
+      <section class="view" id="viewContactos" aria-label="Contactos" hidden></section>
     </main>
   </div>
 
@@ -110,6 +110,6 @@
   <div class="toasts" id="toasts" aria-live="polite"></div>
 
   <script src="Sortable.min.js"></script>
-  <script src="app.js?v=13"></script>
+  <script src="app.js?v=14"></script>
 </body>
 </html>

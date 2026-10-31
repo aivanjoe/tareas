@@ -1491,10 +1491,11 @@
   // ---------- pantallas ----------
   const VIEWS = {
     personal: { title: 'Personal', add: 'Añadir tarea' },
-    cumpledias: { title: 'Cumpledías', eyebrow: 'Fechas', add: 'Añadir persona' }
+    contactos: { title: 'Contactos', eyebrow: 'Cumpledías y cumpleaños', add: 'Añadir persona' }
   };
 
   function applyView() {
+    if (S.ui.view === 'cumpledias') S.ui.view = 'contactos'; // nombre anterior de la pantalla
     if (!VIEWS[S.ui.view]) S.ui.view = 'personal';
     const v = S.ui.view, cfg = VIEWS[v], board = v === 'personal';
     document.querySelectorAll('.nav-item[data-view]').forEach(a => {
@@ -1510,8 +1511,8 @@
     document.getElementById('addLabel').textContent = cfg.add;
     document.getElementById('tagbar').hidden = !board;
     document.getElementById('boardWrap').hidden = !board;
-    document.getElementById('viewCumpledias').hidden = v !== 'cumpledias';
-    if (v === 'cumpledias') renderCumpledias();
+    document.getElementById('viewContactos').hidden = v !== 'contactos';
+    if (v === 'contactos') renderCumpledias();
   }
 
   function showView(v) {
@@ -1522,7 +1523,7 @@
     applyView();
   }
 
-  // ---------- cumpledías ----------
+  // ---------- contactos: cumpledías y cumpleaños ----------
   // Colección "personas": { id, name, birth: 'AAAA-MM-DD' }. Pensada para crecer
   // (p. ej. un vínculo con contactos de Google más adelante).
   const DAY = 86400000;
@@ -1561,7 +1562,7 @@
   }
 
   function renderCumpledias() {
-    const root = document.getElementById('viewCumpledias');
+    const root = document.getElementById('viewContactos');
     const today = todayUtc();
     root.dataset.day = String(today);
     const people = personas().filter(p => isYmd(p.birth)).sort((a, b) => a.name.localeCompare(b.name, 'es'));
@@ -1684,7 +1685,7 @@
       doSync();
     });
     document.getElementById('addBtn').addEventListener('click', () => {
-      if (S.ui.view === 'cumpledias') return openPerson(null);
+      if (S.ui.view === 'contactos') return openPerson(null);
       const cols = columns();
       if (cols.length) openNew(cols[0].key, true);
     });
@@ -1707,7 +1708,7 @@
     setInterval(() => {
       renderSyncState();
       // Al cambiar de día se recalculan los cumpledías
-      const cd = document.getElementById('viewCumpledias');
+      const cd = document.getElementById('viewContactos');
       if (!cd.hidden && cd.dataset.day !== String(todayUtc())) renderCumpledias();
     }, 60000);
   }
