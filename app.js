@@ -4391,16 +4391,19 @@
     document.getElementById('sidebarScrim').addEventListener('click', () => toggleSidebar(false));
     document.getElementById('drawerScrim').addEventListener('click', closeDrawer);
     document.getElementById('syncBtn').addEventListener('click', () => {
+      // Se ponen al día todas las fuentes, pero solo avisa de que ha ido bien la de la pantalla activa
+      // (los errores se avisan siempre)
+      const v = S.ui.view;
       // Si la sesión de OneDrive caducó, este clic lleva al login de Microsoft
       if (odConnected() && S.odState === 'login') odConnect();
-      else syncDatos();
+      else syncDatos({ notify: v === 'gastos' || v === 'consumos' });
       // Contactos de Google: solo si el permiso sigue vigente (no se sale de la página sin pedirlo)
-      if (ggConnected() && ggTokenOk()) syncContactos().then(() => calSync({ notify: S.ui.view === 'calendario' }));
+      if (ggConnected() && ggTokenOk()) syncContactos({ notify: v === 'contactos' }).then(() => calSync({ notify: v === 'calendario' }));
       // Sin permiso vigente no se sale de la página, pero se avisa de que Google se queda sin actualizar
       else if (ggConnected()) toast('El permiso de Google ha caducado: reconecta para actualizar ' + (calReady() ? 'el calendario y los contactos.' : 'los contactos.'), 'error', { label: 'Reconectar', fn: ggLogin }, 10000);
       // Planner: si la sesión del trabajo caducó, este clic lleva a reconectar
-      if (plConnected()) { if (S.plState === 'login') plConnect(); else plSync(); }
-      doSync();
+      if (plConnected()) { if (S.plState === 'login') plConnect(); else plSync({ notify: v === 'trabajo' }); }
+      doSync({ silent: v !== 'personal' });
     });
     document.getElementById('addBtn').addEventListener('click', () => {
       const cfg = VIEWS[S.ui.view];
