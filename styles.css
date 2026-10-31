@@ -512,7 +512,7 @@ a.btn { text-decoration: none; }
 .pl-labels { max-height: 55vh; overflow-y: auto; }
 
 /* Ventanas bajas: barra lateral compacta para que no necesite desplazamiento */
-@media (max-height: 720px) {
+@media (max-height: 820px) {
   .sidebar { gap: 14px; padding-top: calc(14px + env(safe-area-inset-top)); }
   .brand-mark { width: 64px; height: 64px; border-radius: 16px; }
   .brand { gap: 5px; }
@@ -521,6 +521,14 @@ a.btn { text-decoration: none; }
   .nav { gap: 2px; }
   .nav-item { padding: 7px 4px 6px; gap: 3px; }
   .nav-tools { padding-top: 10px; }
+}
+/* Pantallas muy bajas (600-640 px): un poco más apretado para que el menú quepa sin desplazamiento */
+@media (max-height: 640px) {
+  .sidebar { gap: 10px; padding-top: calc(10px + env(safe-area-inset-top)); }
+  .brand-mark { width: 56px; height: 56px; border-radius: 14px; }
+  .brand-mark svg { width: 48px; height: 48px; }
+  .nav-item { padding: 5px 4px 4px; gap: 2px; }
+  .nav-tools { padding-top: 8px; }
 }
 
 /* Calendario (vista de mes) */
@@ -576,3 +584,29 @@ a.btn { text-decoration: none; }
 /* Eventos propios en la lista del día: se pueden pulsar para editarlos */
 .ev.cal-own { width: 100%; text-align: left; font: inherit; color: inherit; cursor: pointer; }
 .ev.cal-own:hover { background: var(--card-hi); }
+
+/* Auditoría */
+.aud-filters { display: flex; flex-wrap: wrap; gap: 8px; }
+.aud-seg { flex-wrap: wrap; }
+.aud-disp { max-width: 220px; }
+.aud-list { display: flex; flex-direction: column; gap: 6px; }
+.aud-day { margin: 10px 0 2px; font-size: 12px; font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+.aud-day:first-child { margin-top: 0; }
+.aud-row { display: grid; grid-template-columns: 44px 10px minmax(0, 1fr); gap: 10px; align-items: start; padding: 9px 12px; border-radius: 10px; background: var(--card); border: 1px solid var(--line); }
+.aud-row .cat-dot { margin-top: 6px; }
+.aud-time { font-size: 12.5px; font-weight: 700; color: var(--text2); font-variant-numeric: tabular-nums; padding-top: 1px; }
+.aud-main { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.aud-text { font-size: 14px; color: var(--text); overflow-wrap: anywhere; }
+.aud-meta { font-size: 12px; color: var(--muted); }
+.aud-tag { display: inline-block; margin-right: 6px; padding: 1px 7px; border-radius: 6px; font-size: 11px; font-weight: 800; background: rgba(127, 162, 224, 0.14); color: var(--blue); vertical-align: 1px; }
+.aud-tag.err { background: rgba(240, 133, 122, 0.16); color: var(--danger); }
+.aud-row.aud-error { border-color: rgba(240, 133, 122, 0.35); }
+.aud-more { align-self: flex-start; margin-top: 2px; }
+.aud-det { margin: 4px 0 0; padding-left: 18px; display: flex; flex-direction: column; gap: 2px; font-size: 12.5px; color: var(--text2); }
+.aud-det li.sub { list-style: circle; margin-left: 14px; color: var(--muted); }
+.aud-nota { margin: 4px 0 0; }
+.stat.aud-err .stat-value { color: #F0857A; }
+@media (max-width: 560px) {
+  .aud-row { grid-template-columns: 38px 8px minmax(0, 1fr); gap: 8px; padding: 8px 10px; }
+  .aud-disp { max-width: none; width: 100%; }
+}

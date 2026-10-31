@@ -177,7 +177,122 @@
     return out;
   }
 
-  const saveDatos = () => { store.set(KEYS.datos, S.datos); odSchedulePush(); calSchedule(); };
+  const saveDatos = () => { auditarDatos(); store.set(KEYS.datos, S.datos); odSchedulePush(); calSchedule(); };
+
+  // ---------- auditoría ----------
+  // Colección "auditoria" del almacén (se comparte entre dispositivos por OneDrive):
+  // { id, ts, disp, fuente, tipo: 'cambio'|'sync'|'error'|'conexion', texto, detalle?: [..], auto?, fuentes? }.
+  // Pasados 90 días (o por encima de 5.000 entradas) se archiva en OneDrive, en logs/AAAA-MM.txt.
+  const AUD_DIAS = 90, AUD_MAX = 5000;
+  const AUD_FUENTES = { visir: ['Visir', '#DBF266'], todoist: ['Todoist', '#F2A65A'], planner: ['Planner', '#7FA2E0'], contactos: ['Contactos', '#6FC3E8'],
+    calendario: ['Calendario', '#8BD17C'], onedrive: ['OneDrive', '#5F7FC0'], google: ['Google', '#C9B6F2'] };
+  // Nombre del dispositivo: el que ponga el usuario en Ajustes o, si no, sistema y navegador
+  // (el navegador no deja leer el nombre del equipo)
+  function dispAuto() {
+    const ua = navigator.userAgent || '';
+    const ipad = /iPad/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1);
+    const so = ipad ? 'iPad' : /iPhone/.test(ua) ? 'iPhone' : /Android/.test(ua) ? 'Android' : /Windows/.test(ua) ? 'Windows' : /Mac OS X|Macintosh/.test(ua) ? 'Mac' : /Linux/.test(ua) ? 'Linux' : 'Otro';
+    const nav = /Edg\//.test(ua) ? 'Edge' : /OPR\//.test(ua) ? 'Opera' : /Firefox\/|FxiOS/.test(ua) ? 'Firefox' : /Chrome\/|CriOS/.test(ua) ? 'Chrome' : /Safari\//.test(ua) ? 'Safari' : 'Navegador';
+    return so + ' · ' + nav;
+  }
+  const dispNombre = () => (store.get('mp.dispositivo', {}).nombre || '').trim() || dispAuto();
+  let audRender = null;
+  function audit(fuente, tipo, texto, opts = {}) {
+    const ts = Date.now();
+    const rec = { id: 'a' + ts.toString(36) + Math.random().toString(36).slice(2, 7), ts, disp: dispNombre(), fuente, tipo, texto: String(texto || '').slice(0, 300) };
+    if (opts.detalle && opts.detalle.length) rec.detalle = opts.detalle.slice(0, 300).map(x => String(x).slice(0, 300));
+    if (opts.auto) rec.auto = true;
+    if (opts.fuentes) rec.fuentes = opts.fuentes;
+    S.datos.colecciones.auditoria = Object.assign({}, S.datos.colecciones.auditoria, { [rec.id]: rec });
+    store.set(KEYS.datos, S.datos); // sin subir al momento: va en la próxima sincronización con OneDrive
+    if (S.ui && S.ui.view === 'auditoria') { clearTimeout(audRender); audRender = setTimeout(() => { if (S.ui.view === 'auditoria') renderAuditoria(); }, 200); }
+  }
+  const plural = (n, uno, varios) => n + ' ' + (n === 1 ? uno : (varios || uno + 's'));
+  // Resultado de una sincronización ({ fuente, detalle: [...], error }). Las automáticas se registran solo
+  // si traen cambios o fallan; las del botón Sincronizar las registra el botón, todas juntas.
+  function finSync(fuente, opts, detalle, error) {
+    const nombre = AUD_FUENTES[fuente][0];
+    const res = { fuente, detalle: detalle || [], error: error || null };
+    res.texto = error ? nombre + ': ' + error : nombre + ': ' + (res.detalle.length ? plural(res.detalle.length, 'cambio') : 'sin cambios');
+    if (!opts.manual && (error || res.detalle.length)) audit(fuente, error ? 'error' : 'sync', res.texto, { detalle: error ? null : res.detalle, auto: true });
+    if (opts.manual && error) audit(fuente, 'error', res.texto);
+    return res;
+  }
+  // Diferencias entre dos listas por id: [nuevos, quitados, cambiados]
+  function difLista(prev, next, nombre, firma) {
+    const a = new Map((prev || []).map(x => [x.id, x])), b = new Map((next || []).map(x => [x.id, x]));
+    const out = [];
+    for (const [id, x] of b) if (!a.has(id)) out.push(['nuevo', x]); else if (firma(a.get(id)) !== firma(x)) out.push(['cambio', x]);
+    for (const [id, x] of a) if (!b.has(id)) out.push(['fuera', x]);
+    return out.map(([k, x]) => [k, nombre(x)]);
+  }
+
+  // Cambios en los datos propios de la app: se comparan con la última foto, registro a registro
+  const AUD_FUERA = new Set(['auditoria', 'contactos', 'gruposContactos']); // los contactos los registra su sincronización
+  let audSnap = null;
+  function snapDatos(doc) {
+    const out = {};
+    for (const [n, col] of Object.entries((doc || S.datos).colecciones)) {
+      if (AUD_FUERA.has(n)) continue;
+      out[n] = {};
+      for (const [id, r] of Object.entries(col || {})) out[n][id] = stable(r);
+    }
+    return out;
+  }
+  function difSnaps(prev, now) {
+    const out = [];
+    for (const n of new Set([...Object.keys(prev), ...Object.keys(now)])) {
+      const a = prev[n] || {}, b = now[n] || {};
+      for (const id of new Set([...Object.keys(a), ...Object.keys(b)])) {
+        if (a[id] === b[id]) continue;
+        const kind = a[id] === undefined ? 'alta' : b[id] === undefined ? 'baja' : 'cambio';
+        let rec = {};
+        try { rec = JSON.parse(b[id] || a[id]) || {}; } catch (e) { /* registro raro */ }
+        const t = describeRegistro(n, id, kind, rec);
+        if (t) out.push(t);
+      }
+    }
+    return out;
+  }
+  function describeRegistro(n, id, kind, r) {
+    const verbo = { alta: 'añadido', cambio: 'modificado', baja: 'borrado' }[kind];
+    const verba = { alta: 'añadida', cambio: 'modificada', baja: 'borrada' }[kind];
+    const q = x => '«' + String(x || '').slice(0, 80) + '»';
+    const tarea = tid => { const t = tareaNombre(tid); return t ? q(t) : 'una tarea'; };
+    const contacto = cid => { const c = (S.datos.colecciones.contactos || {})[cid]; return c ? c.nombre : 'un contacto'; };
+    switch (n) {
+      case 'gastos': return 'Gasto ' + q(r.concepto) + ' ' + verbo;
+      case 'pagos': return 'Pago de ' + q(r.concepto) + (r.fecha ? ' (' + r.fecha + ')' : '') + ' ' + verbo;
+      case 'consumos': return 'Factura de ' + (r.tipo || 'consumo') + (r.fin ? ' hasta ' + r.fin : '') + ' ' + verba;
+      case 'santos': return 'Santo ' + q(r.nombre) + ' ' + verbo;
+      case 'etiquetas': return 'Etiqueta ' + q(r.name) + ' ' + verba;
+      case 'asignaciones': return String(id).startsWith('tmp-') ? null : 'Etiquetas de la tarea ' + tarea(id) + ' cambiadas';
+      case 'orden': return 'Orden de las etiquetas cambiado';
+      case 'cumpledias': return kind === 'baja' ? 'Dejar de seguir en Cumples: ' + contacto(id) : kind === 'alta' ? 'Seguir en Cumples: ' + contacto(id) : null;
+      case 'personas': return 'Persona ' + q(r.name) + ' ' + verba;
+      case 'coloresContactos': return 'Color de la categoría ' + q((grupoMap()[id]) || id) + ' cambiado';
+      case 'fechasTareas': return 'Fecha en el calendario de la tarea ' + tarea(id) + (kind === 'baja' ? ' quitada' : kind === 'alta' ? ' puesta' : ' cambiada');
+      case 'ajustes': return id === 'calendario' ? 'Calendario elegido: ' + q(r.nombre) : 'Ajuste ' + q(id) + ' ' + verbo;
+      default: return n + ' ' + q(id) + ' ' + verbo;
+    }
+  }
+  function auditarDatos() {
+    const now = snapDatos();
+    if (!audSnap) { audSnap = now; return; }
+    const det = difSnaps(audSnap, now);
+    audSnap = now;
+    if (!det.length) return;
+    const ts = Date.now();
+    const rec = { id: 'a' + ts.toString(36) + Math.random().toString(36).slice(2, 7), ts, disp: dispNombre(), fuente: 'visir', tipo: 'cambio',
+      texto: det.length === 1 ? det[0] : plural(det.length, 'cambio') + ' en Visir' };
+    if (det.length > 1) rec.detalle = det.slice(0, 300);
+    S.datos.colecciones.auditoria = Object.assign({}, S.datos.colecciones.auditoria, { [rec.id]: rec });
+    if (S.ui && S.ui.view === 'auditoria') { clearTimeout(audRender); audRender = setTimeout(() => { if (S.ui.view === 'auditoria') renderAuditoria(); }, 200); }
+  }
+  // Nombres de tareas de Todoist vistos en esta sesión (para describir cambios de tareas que ya no están)
+  const nombresTareas = new Map();
+  function recordarNombres() { for (const i of (S.data && S.data.items) || []) nombresTareas.set(i.id, cleanTitle(i.content)); }
+  const tareaNombre = id => { const i = S.data && S.data.items.find(x => x.id === id); return i ? cleanTitle(i.content) : nombresTareas.get(id) || ''; };
   const saveOd = () => store.set(KEYS.onedrive, S.od);
   const saveTags = () => {
     writeTags(S.datos, S.tags);
@@ -187,12 +302,13 @@
   function applyDatos(doc) {
     const pendientes = Object.entries(S.tags.assign).filter(([k]) => k.startsWith('tmp-'));
     S.datos = doc;
+    audSnap = snapDatos(); // lo que llega de fuera lo registra quien lo trae (OneDrive, importar)
     store.set(KEYS.datos, S.datos);
     S.tags = tagsFromDoc(S.datos);
     for (const [k, v] of pendientes) S.tags.assign[k] = v;
   }
   const saveUi = () => store.set(KEYS.ui, S.ui);
-  const saveCache = () => store.set(KEYS.cache, S.data);
+  const saveCache = () => { store.set(KEYS.cache, S.data); recordarNombres(); };
 
   // ---------- utilidades ----------
   function uid() {
@@ -354,34 +470,68 @@
     };
   }
 
+  // Texto de auditoría de un comando de Todoist
+  function describeCmd(c) {
+    const a = c.args || {}, q = x => '«' + String(x || '').slice(0, 80) + '»';
+    const t = id => q(tareaNombre(id) || 'tarea');
+    const sec = id => { const x = S.data && S.data.sections.find(s => s.id === id); return x ? q(x.name) : '«Sin sección»'; };
+    const notaTarea = id => { const n = S.data && (S.data.notes || []).find(x => x.id === id); return n ? t(n.item_id) : 'una tarea'; };
+    switch (c.type) {
+      case 'item_add': return 'Tarea creada: ' + q(cleanTitle(a.content));
+      case 'item_update': return 'Tarea renombrada: ' + q(cleanTitle(a.content));
+      case 'item_move': return 'Tarea ' + t(a.id) + ' movida a ' + (a.section_id ? sec(a.section_id) : '«Sin sección»');
+      case 'item_reorder': return 'Tareas reordenadas';
+      case 'item_close': return 'Tarea completada: ' + t(a.id);
+      case 'item_uncomplete': return 'Tarea recuperada: ' + t(a.id);
+      case 'note_add': return 'Comentario añadido en ' + t(a.item_id);
+      case 'note_update': return 'Comentario editado en ' + notaTarea(a.id);
+      case 'note_delete': return 'Comentario borrado en ' + notaTarea(a.id);
+      default: return 'Cambio en Todoist (' + c.type + ')';
+    }
+  }
+
   async function runCommands(commands) {
-    const r = await apiCall({ commands: JSON.stringify(commands) });
+    const desc = commands.map(describeCmd);
+    const resumen = desc.length === 1 ? desc[0] : desc.every(d => d === desc[0]) ? desc[0] : plural(desc.length, 'cambio') + ' en Todoist';
+    let r;
+    try { r = await apiCall({ commands: JSON.stringify(commands) }); }
+    catch (e) { audit('todoist', 'error', 'No se pudo guardar en Todoist: ' + resumen, { detalle: [e.message] }); throw e; }
     const status = r.sync_status || {};
     for (const c of commands) {
       const st = status[c.uuid];
       if (st !== 'ok') {
         const msg = st && st.error ? 'Todoist rechazó el cambio: ' + st.error : 'Todoist rechazó el cambio.';
+        audit('todoist', 'error', 'Todoist rechazó: ' + describeCmd(c), { detalle: [msg] });
         throw new ApiError('command', msg);
       }
     }
+    audit('todoist', 'cambio', resumen, { detalle: desc.length > 1 && !desc.every(d => d === desc[0]) ? desc : null });
     return r.temp_id_mapping || {};
   }
 
   async function doSync(opts = {}) {
-    if (S.syncing || !S.token) return;
+    if (S.syncing || !S.token) return null;
     S.syncing = true;
     renderSyncState();
+    let res = null;
     try {
+      const prev = S.data;
       S.data = await fetchAll();
       saveCache();
+      const det = !prev ? [] : difLista(prev.items, S.data.items, i => cleanTitle(i.content), i => i.content + '|' + (i.section_id || '') + '|' + i.project_id)
+        .map(([k, n]) => (k === 'nuevo' ? 'Tarea nueva: «' : k === 'fuera' ? 'Tarea completada o borrada: «' : 'Tarea cambiada: «') + n + '»');
+      res = finSync('todoist', opts, det);
+      if (!prev) res.texto = 'Todoist: ' + plural(S.data.items.length, 'tarea leída', 'tareas leídas');
       if (!opts.silent) toast('Sincronizado con Todoist');
     } catch (e) {
+      res = finSync('todoist', opts, null, e.message);
       toast(e.message, 'error');
       if (e.kind === 'auth') openSetup(e.message);
     } finally {
       S.syncing = false;
       renderAll();
     }
+    return res;
   }
 
   // Si una escritura falla, se vuelve a leer Todoist para dejar el tablero como está de verdad
@@ -453,6 +603,7 @@
     S.odState = 'idle';
     renderSyncState();
     if (notify) toast('OneDrive conectado');
+    audit('onedrive', 'conexion', 'OneDrive conectado');
     syncDatos();
   }
 
@@ -481,6 +632,7 @@
   }
 
   async function odDisconnect() {
+    audit('onedrive', 'conexion', 'OneDrive desconectado');
     try {
       if (!msalApp) await loadMsal();
       const acc = odAccount();
@@ -546,11 +698,14 @@
   }
 
   async function syncDatos(opts = {}) {
-    if (!odConnected()) return;
-    if (S.odState === 'syncing') { odAgain = true; return; }
+    if (!odConnected()) return null;
+    if (S.odState === 'syncing') { odAgain = true; return null; }
     clearTimeout(odTimer);
     S.odState = 'syncing';
     renderSyncState();
+    let res = null;
+    const traidos = [];
+    let subido = false;
     try {
       const token = await odToken();
       let done = false;
@@ -563,6 +718,11 @@
         let merged = S.datos;
         if (remote && remote.etag !== S.od.etag) merged = mergeDocs(base, S.datos, remote.doc);
         if (stable(merged.colecciones) !== stable(S.datos.colecciones)) {
+          // Lo que llega de otro dispositivo (sin contar la auditoría)
+          const antes = snapDatos(), despues = snapDatos(merged);
+          traidos.push(...difSnaps(antes, despues));
+          const cA = S.datos.colecciones.contactos || {}, cB = merged.colecciones.contactos || {};
+          if (stable(cA) !== stable(cB)) traidos.push('Contactos actualizados desde otro dispositivo');
           applyDatos(merged);
           renderAll();
           if (S.editing) renderDrawer();
@@ -572,10 +732,11 @@
           S.od.etag = remote.etag;
           done = true;
         } else {
-          const res = await odPush(token, merged, remote ? remote.etag : null);
-          if (res.conflict) continue; // otro dispositivo escribió entretanto: leer y fusionar otra vez
+          const pr = await odPush(token, merged, remote ? remote.etag : null);
+          if (pr.conflict) continue; // otro dispositivo escribió entretanto: leer y fusionar otra vez
           S.odBase = normalizeDoc(merged);
-          S.od.etag = res.etag;
+          S.od.etag = pr.etag;
+          subido = true;
           done = true;
         }
       }
@@ -584,8 +745,13 @@
       S.od.syncedAt = Date.now();
       saveOd();
       S.odState = 'idle';
+      res = finSync('onedrive', opts, traidos.map(t => 'De otro dispositivo: ' + t));
+      if (subido && opts.manual) res.texto = 'OneDrive: ' + (traidos.length ? plural(traidos.length, 'cambio traído', 'cambios traídos') + ' de otro dispositivo' : 'nada nuevo de otros dispositivos') + ' · subidos los cambios de este';
+      // Pasados 90 días, el historial se archiva en OneDrive (logs/AAAA-MM.txt)
+      try { await archivarAuditoria(token); } catch (e) { audit('onedrive', 'error', 'No se pudo archivar el historial: ' + (e.message || ''), { auto: true }); }
       if (opts.notify) toast('Datos sincronizados con OneDrive');
     } catch (e) {
+      res = finSync('onedrive', opts, null, e.message || 'Error al sincronizar con OneDrive.');
       S.odState = e.kind === 'login' ? 'login' : 'error';
       if (e.kind === 'login') toast(e.message, 'error', { label: 'Conectar', fn: odConnect }, 10000);
       else toast(e.message || 'Error al sincronizar con OneDrive.', 'error');
@@ -593,6 +759,55 @@
       renderSyncState();
       if (odAgain) { odAgain = false; odSchedulePush(); }
     }
+    return res;
+  }
+
+  // ---- archivo del historial de auditoría en OneDrive: logs/AAAA-MM.txt ----
+  // Una línea por entrada, separada por tabuladores: id, fecha y hora, dispositivo, fuente, tipo, texto, detalle.
+  // Si dos dispositivos archivan a la vez, el id evita repetir líneas.
+  const AUD_TIPOS = { cambio: 'Cambio', sync: 'Sincronización', error: 'Error', conexion: 'Conexión' };
+  const two = n => String(n).padStart(2, '0');
+  const fechaHora = ts => { const d = new Date(ts); return d.getFullYear() + '-' + two(d.getMonth() + 1) + '-' + two(d.getDate()) + ' ' + two(d.getHours()) + ':' + two(d.getMinutes()) + ':' + two(d.getSeconds()); };
+  const limpio = x => String(x || '').replace(/[\t\r\n]+/g, ' ').trim();
+  const lineaAud = r => [r.id, fechaHora(r.ts), limpio(r.disp), (AUD_FUENTES[r.fuente] || [r.fuente])[0], (AUD_TIPOS[r.tipo] || r.tipo) + (r.auto ? ' (automático)' : ''), limpio(r.texto), limpio((r.detalle || []).join(' | '))].join('\t');
+  async function odGetText(token, path) {
+    const r = await graphFetch(graphPath(path), { headers: { Authorization: 'Bearer ' + token } });
+    if (r.status === 404) return '';
+    if (r.status === 401) throw new OdError('login', 'La sesión de OneDrive ha caducado. Vuelve a conectar.');
+    if (!r.ok) throw new OdError('http', 'OneDrive respondió con un error (' + r.status + ').');
+    const url = (await r.json())['@microsoft.graph.downloadUrl'];
+    const c = await graphFetch(url);
+    if (!c.ok) throw new OdError('http', 'No se pudo leer ' + path + ' (' + c.status + ').');
+    return c.text();
+  }
+  async function odPutText(token, path, text) {
+    const r = await graphFetch(graphPath(path) + ':/content', { method: 'PUT', headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'text/plain; charset=utf-8' }, body: text });
+    if (r.status === 401) throw new OdError('login', 'La sesión de OneDrive ha caducado. Vuelve a conectar.');
+    if (!r.ok) throw new OdError('http', 'OneDrive no aceptó ' + path + ' (' + r.status + ').');
+  }
+  async function archivarAuditoria(token) {
+    const todas = Object.values(S.datos.colecciones.auditoria || {}).sort((a, b) => b.ts - a.ts);
+    const lim = Date.now() - AUD_DIAS * 86400000;
+    const viejas = todas.filter((r, i) => r.ts < lim || i >= AUD_MAX);
+    if (!viejas.length) return 0;
+    const porMes = {};
+    for (const r of viejas) { const d = new Date(r.ts); (porMes[d.getFullYear() + '-' + two(d.getMonth() + 1)] = porMes[d.getFullYear() + '-' + two(d.getMonth() + 1)] || []).push(r); }
+    const ficheros = [];
+    for (const [mes, recs] of Object.entries(porMes)) {
+      const path = 'logs/' + mes + '.txt';
+      let txt = await odGetText(token, path);
+      const ya = new Set(txt.split('\n').map(l => l.split('\t')[0]));
+      if (!txt) txt = '# Visir · historial de ' + mes + '\n# id\tfecha y hora\tdispositivo\tfuente\ttipo\tdescripción\tdetalle\n';
+      const nuevas = recs.filter(r => !ya.has(r.id)).sort((a, b) => a.ts - b.ts).map(lineaAud);
+      if (nuevas.length) { await odPutText(token, path, txt.replace(/\n?$/, '\n') + nuevas.join('\n') + '\n'); ficheros.push(path); }
+    }
+    const rest = Object.assign({}, S.datos.colecciones.auditoria);
+    for (const r of viejas) delete rest[r.id];
+    S.datos.colecciones.auditoria = rest;
+    store.set(KEYS.datos, S.datos);
+    odAgain = true; // el borrado se sube en la siguiente vuelta
+    audit('onedrive', 'sync', 'Historial archivado: ' + plural(viejas.length, 'entrada') + (ficheros.length ? ' en ' + ficheros.join(', ') : ''), { auto: true });
+    return viejas.length;
   }
 
   // Tras un cambio en los datos de la app se sube a OneDrive al poco (agrupando cambios seguidos)
@@ -603,7 +818,9 @@
     odTimer = setTimeout(() => syncDatos(), 1500);
   }
 
-  const odPending = () => !S.odBase || stable(S.datos.colecciones) !== stable(normalizeDoc(S.odBase).colecciones);
+  // Pendiente de subir (sin contar la auditoría, que viaja con el siguiente cambio o sincronización)
+  const sinAud = c => { const o = Object.assign({}, c); delete o.auditoria; return o; };
+  const odPending = () => !S.odBase || stable(sinAud(S.datos.colecciones)) !== stable(sinAud(normalizeDoc(S.odBase).colecciones));
 
   // ---------- Trabajo: Microsoft Planner ----------
   // Misma App Registration y misma MSAL que OneDrive, con la cuenta del trabajo (autoridad
@@ -646,10 +863,12 @@
     savePl();
     S.plState = 'idle';
     toast('Planner conectado');
+    audit('planner', 'conexion', 'Planner conectado');
     plSync();
   }
 
   async function plDisconnect() {
+    audit('planner', 'conexion', 'Planner desconectado');
     try {
       if (!msalApp) await loadMsal();
       const acc = plAccount();
@@ -676,7 +895,34 @@
     }
   }
 
+  // Texto de auditoría de una escritura en Planner
+  function describePl(method, path, body) {
+    const q = x => '«' + String(x || '').slice(0, 80) + '»';
+    const m = /^\/planner\/tasks\/([^/]+)(\/details)?$/.exec(path);
+    const t = m ? plTask(m[1]) : null, nom = q((body && body.title) || (t && t.title) || 'tarea');
+    if (method === 'POST' && path === '/planner/tasks') return 'Tarea creada: ' + nom;
+    if (/\/planner\/plans\/[^/]+\/details$/.test(path)) return 'Nombres de las etiquetas del plan cambiados';
+    if (m && m[2]) return 'Notas guardadas en ' + nom;
+    if (m && body) {
+      if (body.percentComplete === 100) return 'Tarea completada: ' + nom;
+      if (body.percentComplete === 0) return 'Tarea recuperada: ' + nom;
+      const partes = [];
+      if (body.title) partes.push('renombrada');
+      if (body.bucketId) { const b = S.pl.buckets.find(x => x.id === body.bucketId); partes.push('movida a ' + q(b ? b.name : 'otra columna')); }
+      else if (body.orderHint) partes.push('reordenada');
+      if (body.appliedCategories) partes.push('etiquetas cambiadas');
+      return 'Tarea ' + nom + ': ' + (partes.join(', ') || 'modificada');
+    }
+    return 'Cambio en Planner';
+  }
+
   async function plCall(method, path, body, etag) {
+    if (method === 'GET') return plCallRaw(method, path, body, etag);
+    const desc = describePl(method, path, body);
+    try { const r = await plCallRaw(method, path, body, etag); audit('planner', 'cambio', desc); return r; }
+    catch (e) { audit('planner', 'error', 'No se pudo guardar en Planner: ' + desc, { detalle: [e.message] }); throw e; }
+  }
+  async function plCallRaw(method, path, body, etag) {
     const token = await plToken();
     const headers = { Authorization: 'Bearer ' + token };
     if (body !== undefined) headers['Content-Type'] = 'application/json';
@@ -708,9 +954,11 @@
   const normTitle = s => String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
 
   async function plSync(opts = {}) {
-    if (!plConnected() || S.plState === 'syncing') return;
+    if (!plConnected() || S.plState === 'syncing') return null;
     S.plState = 'syncing';
     renderSyncState();
+    let res = null;
+    const prevTasks = S.pl.tasks, prevPlan = S.pl.planId;
     try {
       const plans = (await plList('/me/planner/plans')).map(p => ({ id: p.id, title: p.title }));
       plans.sort((a, b) => a.title.localeCompare(b.title, 'es'));
@@ -730,14 +978,20 @@
       Object.assign(S.pl, { plans, planId, buckets, tasks, cats, syncedAt: Date.now() });
       savePl();
       S.plState = 'idle';
+      const det = !prevTasks || prevPlan !== planId ? [] : difLista(prevTasks, tasks, t => t.title, t => t.title + '|' + t.bucketId + '|' + t.cats.join())
+        .map(([k, n]) => (k === 'nuevo' ? 'Tarea nueva: «' : k === 'fuera' ? 'Tarea completada o borrada: «' : 'Tarea cambiada: «') + n + '»');
+      res = finSync('planner', opts, det);
+      if (!prevTasks || prevPlan !== planId) res.texto = 'Planner: ' + plural(tasks.length, 'tarea leída', 'tareas leídas');
       if (opts.notify) toast('Sincronizado con Planner');
     } catch (e) {
+      res = finSync('planner', opts, null, e.message);
       S.plState = e.kind === 'login' ? 'login' : 'error';
       if (e.kind === 'login') toast(e.message, 'error', { label: 'Conectar', fn: plConnect }, 10000);
       else toast(e.message || 'Error al leer Planner.', 'error');
     } finally {
       renderAll();
     }
+    return res;
   }
 
   // Si una escritura falla se avisa y se vuelve a leer Planner
@@ -988,12 +1242,14 @@
         S.gg.account = me.email || 'Cuenta de Google';
         saveGg();
         toast('Google conectado');
+        audit('google', 'conexion', 'Google conectado');
       }
     } catch (e) { /* se reintenta al sincronizar */ }
     S.ggState = 'idle';
     let next = null;
     try { next = JSON.parse(sessionStorage.getItem(GG_NEXT) || 'null'); } catch (e) { /* nada */ }
     sessionStorage.removeItem(GG_NEXT);
+    audit('google', 'conexion', 'Permiso de Google renovado');
     await syncContactos();
     applyView();
     calSync();
@@ -1014,6 +1270,7 @@
   }
 
   function ggDisconnect() {
+    audit('google', 'conexion', 'Google desconectado');
     if (S.gg.token) fetch('https://oauth2.googleapis.com/revoke?token=' + encodeURIComponent(S.gg.token), { method: 'POST', mode: 'no-cors' }).catch(() => {});
     S.gg.account = '';
     S.gg.token = null;
@@ -1087,10 +1344,11 @@
   const grupoMap = () => Object.fromEntries(Object.values(S.datos.colecciones.gruposContactos || {}).map(g => [g.id, g.nombre]));
 
   async function syncContactos(opts = {}) {
-    if (!ggConnected() && !S.gg.token) return;
-    if (S.ggState === 'syncing') return;
+    if (!ggConnected() && !S.gg.token) return null;
+    if (S.ggState === 'syncing') return null;
     S.ggState = 'syncing';
     renderSyncState();
+    let res = null;
     try {
       const groups = {}, grecs = {};
       let page = '';
@@ -1123,8 +1381,16 @@
           } catch (e) { fallos++; }
         }
         if (!fallos) { S.gg.santosLimpios = true; saveGg(); }
-        if (conSanto.length - fallos > 0) toast('Quitado el santo de ' + (conSanto.length - fallos) + (conSanto.length - fallos === 1 ? ' contacto' : ' contactos') + ' en Google');
+        if (conSanto.length - fallos > 0) {
+          toast('Quitado el santo de ' + (conSanto.length - fallos) + (conSanto.length - fallos === 1 ? ' contacto' : ' contactos') + ' en Google');
+          audit('contactos', 'cambio', 'Santo quitado de ' + plural(conSanto.length - fallos, 'contacto') + ' en Google', { auto: true });
+        }
       }
+      const prevC = Object.values(S.datos.colecciones.contactos || {});
+      const det = !prevC.length ? [] : difLista(prevC, Object.values(recs), c => c.nombre, c => stable(c))
+        .map(([k, n]) => (k === 'nuevo' ? 'Contacto nuevo: ' : k === 'fuera' ? 'Contacto que ya no está: ' : 'Contacto cambiado: ') + n);
+      res = finSync('contactos', opts, det);
+      if (!prevC.length) res.texto = 'Contactos: ' + plural(Object.keys(recs).length, 'contacto leído', 'contactos leídos');
       if (stable(recs) !== stable(S.datos.colecciones.contactos || {}) || stable(grecs) !== stable(S.datos.colecciones.gruposContactos || {})) {
         S.datos.colecciones.contactos = recs;
         S.datos.colecciones.gruposContactos = grecs;
@@ -1136,12 +1402,14 @@
       if (S.ui.view === 'contactos' || S.ui.view === 'calendario') applyView();
       if (opts.notify) toast(Object.keys(recs).length + ' contactos actualizados desde Google');
     } catch (e) {
+      res = finSync('contactos', opts, null, e.message);
       S.ggState = e.kind === 'login' ? 'login' : 'error';
       if (e.kind === 'login') toast(e.message, 'error', { label: 'Conectar', fn: ggLogin }, 10000);
       else toast(e.message || 'Error al leer los contactos de Google.', 'error');
     } finally {
       renderSyncState();
     }
+    return res;
   }
 
   // ---- escritura en Google ----
@@ -1193,12 +1461,14 @@
     if (changes.length) person = await ggGet(PEOPLE + rn + '?personFields=' + PERSON_FIELDS); // etag y grupos al día
     const rec = contactFrom(person, groups);
     S.datos.colecciones.contactos = Object.assign({}, S.datos.colecciones.contactos, { [rec.id]: rec });
+    audit('contactos', 'cambio', (cur ? 'Contacto modificado: ' : 'Contacto creado: ') + rec.nombre);
     saveDatos();
     return rec;
   }
 
   async function deleteContacto(c) {
     await ggCall('DELETE', PEOPLE + c.resourceName + ':deleteContact');
+    audit('contactos', 'cambio', 'Contacto borrado: ' + c.nombre);
     const rest = Object.assign({}, S.datos.colecciones.contactos);
     delete rest[c.id];
     S.datos.colecciones.contactos = rest;
@@ -1321,17 +1591,17 @@
     } while (page);
     const want = calDesired();
     const seen = new Set();
-    let cambios = 0;
+    const cambios = [];
     for (const e of mine) {
       const key = ((e.extendedProperties || {}).private || {}).mpKey;
       // Sin datos de Todoist cargados no se tocan los eventos de tareas
       if (key && key.startsWith('tarea:') && !S.data) { seen.add(key); continue; }
       const d = want.get(key);
-      if (!d || seen.has(key)) { await ggCall('DELETE', CALAPI + 'calendars/' + cid + '/events/' + encodeURIComponent(e.id)); cambios++; continue; }
+      if (!d || seen.has(key)) { await ggCall('DELETE', CALAPI + 'calendars/' + cid + '/events/' + encodeURIComponent(e.id)); cambios.push('Evento de Visir borrado: «' + (e.summary || '') + '»'); continue; }
       seen.add(key);
-      if (!calSame(e, d)) { await ggCall('PUT', CALAPI + 'calendars/' + cid + '/events/' + encodeURIComponent(e.id), d); cambios++; }
+      if (!calSame(e, d)) { await ggCall('PUT', CALAPI + 'calendars/' + cid + '/events/' + encodeURIComponent(e.id), d); cambios.push('Evento de Visir puesto al día: «' + d.summary + '»'); }
     }
-    for (const [key, d] of want) if (!seen.has(key)) { await ggCall('POST', CALAPI + 'calendars/' + cid + '/events', d); cambios++; }
+    for (const [key, d] of want) if (!seen.has(key)) { await ggCall('POST', CALAPI + 'calendars/' + cid + '/events', d); cambios.push('Evento de Visir creado: «' + d.summary + '»'); }
     return cambios;
   }
 
@@ -1359,12 +1629,15 @@
   }
 
   async function calSync(opts = {}) {
-    if (!calReady() || !ggTokenOk() || S.calState === 'syncing') return;
+    if (!calReady() || !ggTokenOk() || S.calState === 'syncing') return null;
     clearTimeout(calTimer);
     S.calState = 'syncing';
     renderSyncState();
+    let res = null;
     try {
-      const cambios = await calReconcile();
+      const lista = await calReconcile();
+      const cambios = lista.length;
+      res = finSync('calendario', opts, lista);
       const t = new Date(todayUtc());
       const from = ymdOf(Date.UTC(t.getUTCFullYear(), t.getUTCMonth() - 2, 1));
       const to = ymdOf(Date.UTC(t.getUTCFullYear(), t.getUTCMonth() + 13, 1));
@@ -1375,6 +1648,7 @@
       S.calState = 'idle';
       if (opts.notify) toast('Calendario sincronizado' + (cambios ? ' (' + cambios + (cambios === 1 ? ' cambio)' : ' cambios)') : ''));
     } catch (e) {
+      res = finSync('calendario', opts, null, e.message || 'Error con Google Calendar.');
       S.calState = 'error';
       if (e.kind === 'login') { S.calState = 'idle'; toast(e.message, 'error', { label: 'Conectar', fn: ggLogin }, 10000); }
       else if (e.kind === 'scope') toast(e.message, 'error', { label: 'Dar permiso', fn: () => ggLogin(true) }, 15000);
@@ -1383,6 +1657,7 @@
       renderSyncState();
       if (S.ui.view === 'calendario') renderCal();
     }
+    return res;
   }
 
   // Tras un cambio en datos que afectan al calendario, se pone al día al poco (si el permiso sigue vigente)
@@ -2071,6 +2346,7 @@
         const data = await fetchAll(token);
         S.token = token;
         store.set(KEYS.token, token);
+        audit('todoist', 'conexion', 'Todoist conectado (token nuevo)');
         S.data = data;
         saveCache();
         close();
@@ -2388,6 +2664,23 @@
   }
 
   // Ajustes
+  // Nombre de este dispositivo para la auditoría (se guarda solo en este navegador)
+  function dispSection() {
+    const inp = h('input', { class: 'input', type: 'text', maxlength: '40', placeholder: dispAuto(), 'aria-label': 'Nombre de este dispositivo', autocomplete: 'off' });
+    inp.value = (store.get('mp.dispositivo', {}).nombre || '');
+    const guardar = () => {
+      const v = inp.value.trim(), antes = dispNombre();
+      store.set('mp.dispositivo', { nombre: v });
+      if (dispNombre() !== antes) audit('visir', 'conexion', 'Dispositivo renombrado: ' + antes + ' → ' + dispNombre());
+      toast('Nombre del dispositivo guardado');
+    };
+    inp.addEventListener('keydown', e => { if (e.key === 'Enter') guardar(); });
+    return h('div', { class: 'modal-section' },
+      h('h3', null, 'Este dispositivo'),
+      h('p', { class: 'muted' }, 'Nombre con el que sale en la Auditoría (p. ej. PC trabajo, PC casa, iPad). El navegador no deja leer el nombre del equipo; si lo dejas vacío se usa «' + dispAuto() + '».'),
+      h('div', { class: 'row-edit two' }, inp, h('button', { type: 'button', class: 'btn ghost small', onclick: guardar }, 'Guardar')));
+  }
+
   function openSettings() {
     const fileInput = h('input', { type: 'file', accept: 'application/json,.json', hidden: true });
     fileInput.addEventListener('change', async () => {
@@ -2406,6 +2699,7 @@
           const merged = normalizeDoc(S.datos);
           for (const n of names) merged.colecciones[n] = doc.colecciones[n];
           applyDatos(merged);
+          audit('visir', 'cambio', 'Datos importados de un fichero', { detalle: names.map(n => n + ': ' + plural(Object.keys(doc.colecciones[n]).length, 'registro')) });
           saveDatos();
         } else {
           // Formato antiguo: solo etiquetas
@@ -2449,6 +2743,7 @@
       odSection(),
       plSection(),
       ggSection(),
+      dispSection(),
       h('div', { class: 'modal-section' },
         h('h3', null, 'Copia de seguridad'),
         h('p', { class: 'muted' }, 'Exporta todos los datos de la app en un fichero, o importa una copia. Al importar se sustituye solo lo que trae el fichero (por ejemplo, gastos y pagos); lo demás no se toca.'),
@@ -2484,7 +2779,8 @@
     calendario: { title: 'Calendario', eyebrow: () => calCfg() ? calCfg().nombre : 'Google Calendar', add: 'Nuevo evento', el: 'viewCalendario', render: () => renderCal(), onAdd: () => openCalEvent(null) },
     contactos: { title: 'Contactos', eyebrow: 'Agenda y cumples', add: () => ctTab() === 'agenda' ? 'Nuevo contacto' : 'Elegir contactos', el: 'viewContactos', render: () => renderCumpledias(), onAdd: () => ctTab() === 'agenda' ? openEditContacto(null) : openCdPicker() },
     gastos: { title: 'Gastos', eyebrow: 'Pagos recurrentes', add: 'Nuevo gasto', el: 'viewGastos', render: () => renderGastos(), onAdd: () => openGasto(null) },
-    consumos: { title: 'Consumos', eyebrow: 'Luz, gas y agua', add: 'Subir facturas', el: 'viewConsumos', render: () => renderConsumos(), onAdd: () => pickFacturas() }
+    consumos: { title: 'Consumos', eyebrow: 'Luz, gas y agua', add: 'Subir facturas', el: 'viewConsumos', render: () => renderConsumos(), onAdd: () => pickFacturas() },
+    auditoria: { title: 'Auditoría', eyebrow: 'Historial de cambios', add: 'Exportar CSV', addIcon: 'file', el: 'viewAuditoria', render: () => renderAuditoria(), onAdd: () => exportarAuditoria() }
   };
 
   function applyView() {
@@ -2759,8 +3055,10 @@
           if (!body.recurrence.length) delete body.recurrence;
           await ggCall('POST', CALAPI + 'calendars/' + cid + '/events', Object.assign(body, { reminders: { useDefault: true } }));
         }
+        audit('calendario', 'cambio', (src ? 'Evento modificado: «' : 'Evento creado: «') + t + '»' + (src && serie ? ' (toda la serie)' : ''));
         await tras(src ? 'Evento guardado en Google Calendar' : 'Evento creado en Google Calendar');
       } catch (e) {
+        audit('calendario', 'error', 'No se pudo guardar el evento «' + t + '»', { detalle: [e.message || ''] });
         saveBtn.disabled = false;
         saveBtn.textContent = ev ? 'Guardar' : 'Crear evento';
         fallo(e);
@@ -2768,8 +3066,13 @@
     });
     const borrar = async (id, pregunta, msg) => {
       if (!confirm(pregunta)) return;
-      try { await ggCall('DELETE', CALAPI + 'calendars/' + cid + '/events/' + encodeURIComponent(id)); await tras(msg); }
-      catch (e) { fallo(e); }
+      const nom = '«' + (src.summary || 'evento') + '»';
+      try {
+        await ggCall('DELETE', CALAPI + 'calendars/' + cid + '/events/' + encodeURIComponent(id));
+        audit('calendario', 'cambio', id === src.id ? (serie ? 'Serie borrada: ' : 'Evento borrado: ') + nom : 'Evento borrado solo el ' + (ev.start || '').slice(0, 10) + ': ' + nom);
+        await tras(msg);
+      }
+      catch (e) { audit('calendario', 'error', 'No se pudo borrar ' + nom, { detalle: [e.message || ''] }); fallo(e); }
     };
     const serie = !!(ev && ev.serie);
     const fld = (label, ...els) => h('div', { class: 'field' }, h('span', { class: 'field-label' }, label), ...els);
@@ -3201,6 +3504,7 @@
           if (fresh) openEditContacto(fresh.id);
           return;
         }
+        audit('contactos', 'error', 'No se pudo guardar el contacto ' + (cur ? cur.nombre : 'nuevo'), { detalle: [e.message || ''] });
         toast(e.message || 'No se pudo guardar en Google.', 'error', null, 10000);
       }
     };
@@ -4394,16 +4698,27 @@
       // Se ponen al día todas las fuentes, pero solo avisa de que ha ido bien la de la pantalla activa
       // (los errores se avisan siempre)
       const v = S.ui.view;
+      const trabajos = [];
       // Si la sesión de OneDrive caducó, este clic lleva al login de Microsoft
       if (odConnected() && S.odState === 'login') odConnect();
-      else syncDatos({ notify: v === 'gastos' || v === 'consumos' });
+      else trabajos.push(syncDatos({ notify: v === 'gastos' || v === 'consumos', manual: true }));
       // Contactos de Google: solo si el permiso sigue vigente (no se sale de la página sin pedirlo)
-      if (ggConnected() && ggTokenOk()) syncContactos({ notify: v === 'contactos' }).then(() => calSync({ notify: v === 'calendario' }));
+      if (ggConnected() && ggTokenOk()) trabajos.push(syncContactos({ notify: v === 'contactos', manual: true }).then(async r => [r, await calSync({ notify: v === 'calendario', manual: true })]));
       // Sin permiso vigente no se sale de la página, pero se avisa de que Google se queda sin actualizar
       else if (ggConnected()) toast('El permiso de Google ha caducado: reconecta para actualizar ' + (calReady() ? 'el calendario y los contactos.' : 'los contactos.'), 'error', { label: 'Reconectar', fn: ggLogin }, 10000);
       // Planner: si la sesión del trabajo caducó, este clic lleva a reconectar
-      if (plConnected()) { if (S.plState === 'login') plConnect(); else plSync({ notify: v === 'trabajo' }); }
-      doSync({ silent: v !== 'personal' });
+      if (plConnected()) { if (S.plState === 'login') plConnect(); else trabajos.push(plSync({ notify: v === 'trabajo', manual: true })); }
+      trabajos.push(doSync({ silent: v !== 'personal', manual: true }));
+      // Una sola entrada de auditoría con el resultado de cada fuente (se registra siempre, aunque no haya cambios)
+      Promise.all(trabajos.map(p => p.catch(() => null))).then(rs => {
+        const res = rs.flat().filter(Boolean);
+        if (!res.length) return;
+        const n = res.reduce((a, r) => a + (r.error ? 0 : r.detalle.length), 0), err = res.filter(r => r.error).length;
+        const detalle = [];
+        for (const r of res) { detalle.push(r.texto); for (const d of r.detalle.slice(0, 50)) detalle.push('· ' + d); }
+        audit('visir', err ? 'error' : 'sync', 'Sincronización manual: ' + (n ? plural(n, 'cambio') : 'sin cambios') + (err ? ' · ' + plural(err, 'fuente') + ' con error' : ''),
+          { detalle, fuentes: res.map(r => r.fuente) });
+      });
     });
     document.getElementById('addBtn').addEventListener('click', () => {
       const cfg = VIEWS[S.ui.view];
@@ -4441,7 +4756,113 @@
     }, 60000);
   }
 
+  // ---------- pantalla Auditoría ----------
+  const audF = { tipo: 'todo', fuente: null, disp: '', q: '', ver: 200 };
+  const audAbiertos = new Set();
+  const audFiltradas = () => {
+    const q = normName(audF.q);
+    return Object.values(S.datos.colecciones.auditoria || {}).sort((a, b) => b.ts - a.ts).filter(r =>
+      (audF.tipo === 'todo' || r.tipo === audF.tipo) &&
+      (!audF.fuente || r.fuente === audF.fuente || (r.fuentes || []).includes(audF.fuente)) &&
+      (!audF.disp || r.disp === audF.disp) &&
+      (!q || normName(r.texto + ' ' + (r.detalle || []).join(' ') + ' ' + r.disp).includes(q)));
+  };
+  function renderAuditoria() {
+    const root = document.getElementById('viewAuditoria');
+    const todas = Object.values(S.datos.colecciones.auditoria || {});
+    const hoy0 = new Date(); hoy0.setHours(0, 0, 0, 0);
+    const sem = Date.now() - 7 * 86400000;
+    const stat = (label, value, sub, cls) => h('div', { class: 'stat' + (cls ? ' ' + cls : '') },
+      h('span', { class: 'stat-label' }, label), h('span', { class: 'stat-value' }, value), h('span', { class: 'stat-sub' }, sub));
+    const nHoy = todas.filter(r => r.ts >= hoy0.getTime()).length;
+    const nCamb = todas.filter(r => r.ts >= sem && r.tipo === 'cambio').length;
+    const nErr = todas.filter(r => r.ts >= sem && r.tipo === 'error').length;
+    const ultSync = todas.filter(r => r.tipo === 'sync' && !r.auto).sort((a, b) => b.ts - a.ts)[0];
+    const stats = h('div', { class: 'stats' },
+      stat('Hoy', String(nHoy), nHoy === 1 ? 'entrada' : 'entradas', 'accent'),
+      stat('Cambios', String(nCamb), 'últimos 7 días'),
+      stat('Errores', String(nErr), 'últimos 7 días', nErr ? 'aud-err' : ''),
+      stat('Última sincronización', ultSync ? new Date(ultSync.ts).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' }) : '—', ultSync ? (new Date(ultSync.ts).toDateString() === new Date().toDateString() ? 'hoy' : new Date(ultSync.ts).toLocaleDateString('es-ES', { day: 'numeric', month: 'short' })) + ' · ' + ultSync.disp : 'manual'));
+
+    const seg = h('div', { class: 'seg aud-seg', role: 'group', 'aria-label': 'Tipo' },
+      [['todo', 'Todo'], ['cambio', 'Cambios'], ['sync', 'Sincronizaciones'], ['error', 'Errores'], ['conexion', 'Conexiones']].map(([k, l]) =>
+        h('button', { type: 'button', class: audF.tipo === k ? 'on' : '', 'aria-pressed': audF.tipo === k ? 'true' : 'false', onclick: () => { audF.tipo = k; audF.ver = 200; renderAuditoria(); } }, l)));
+    const presentes = new Set(todas.flatMap(r => [r.fuente].concat(r.fuentes || [])));
+    const chip = (k, label, color) => h('button', { type: 'button', class: 'chip' + (audF.fuente === k ? ' on' : ''), style: '--c:' + color, 'aria-pressed': audF.fuente === k ? 'true' : 'false',
+      onclick: () => { audF.fuente = audF.fuente === k ? null : k; audF.ver = 200; renderAuditoria(); } }, k === null ? null : h('span', { class: 'dot' }), label);
+    const chips = h('div', { class: 'chips' }, chip(null, 'Todas', '#C9D0DC'),
+      Object.entries(AUD_FUENTES).filter(([k]) => presentes.has(k)).map(([k, [l, c]]) => chip(k, l, c)));
+    const disps = [...new Set(todas.map(r => r.disp))].sort((a, b) => a.localeCompare(b, 'es'));
+    if (audF.disp && !disps.includes(audF.disp)) audF.disp = '';
+    const dsel = disps.length > 1 ? h('select', { class: 'select aud-disp', 'aria-label': 'Dispositivo' }, h('option', { value: '' }, 'Todos los dispositivos'), disps.map(d => h('option', { value: d, selected: d === audF.disp }, d))) : null;
+    if (dsel) dsel.addEventListener('change', () => { audF.disp = dsel.value; audF.ver = 200; draw(); });
+    const search = h('input', { class: 'input search', type: 'search', placeholder: 'Buscar en el historial', value: audF.q, 'aria-label': 'Buscar en el historial', autocomplete: 'off' });
+    search.addEventListener('input', () => { audF.q = search.value; audF.ver = 200; draw(); });
+    const count = h('span', { class: 'panel-total' });
+    const list = h('div', { class: 'aud-list' });
+
+    const diaTxt = d => {
+      const t0 = new Date(); t0.setHours(0, 0, 0, 0);
+      const x = new Date(d); x.setHours(0, 0, 0, 0);
+      const diff = Math.round((t0 - x) / 86400000);
+      return diff === 0 ? 'Hoy' : diff === 1 ? 'Ayer' : cap(x.toLocaleDateString('es-ES', { weekday: 'long', day: 'numeric', month: 'long', year: x.getFullYear() === t0.getFullYear() ? undefined : 'numeric' }));
+    };
+    const fila = r => {
+      const [fl, fc] = AUD_FUENTES[r.fuente] || [r.fuente, '#9AA4B5'];
+      const abierto = audAbiertos.has(r.id);
+      const det = (r.detalle || []).length;
+      const meta = [fl, r.disp, r.auto ? 'automático' : ''].filter(Boolean).join(' · ');
+      return h('div', { class: 'aud-row aud-' + r.tipo + (abierto ? ' open' : '') },
+        h('span', { class: 'aud-time' }, new Date(r.ts).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })),
+        h('span', { class: 'cat-dot', style: '--c:' + (isHex(fc) ? fc : '#9AA4B5') }),
+        h('div', { class: 'aud-main' },
+          h('span', { class: 'aud-text' }, r.tipo === 'error' ? h('span', { class: 'aud-tag err' }, 'Error') : r.tipo === 'conexion' ? h('span', { class: 'aud-tag' }, 'Conexión') : r.tipo === 'sync' ? h('span', { class: 'aud-tag' }, 'Sincronización') : null, r.texto),
+          h('span', { class: 'aud-meta' }, meta),
+          det ? h('button', { type: 'button', class: 'btn subtle small aud-more', 'aria-expanded': abierto ? 'true' : 'false',
+            onclick: () => { if (abierto) audAbiertos.delete(r.id); else audAbiertos.add(r.id); draw(); } }, abierto ? 'Ocultar detalle' : 'Ver detalle (' + det + ')') : null,
+          abierto ? h('ul', { class: 'aud-det' }, r.detalle.map(x => h('li', { class: /^· /.test(x) ? 'sub' : '' }, x.replace(/^· /, '')))) : null));
+    };
+    function draw() {
+      const fl = audFiltradas();
+      count.textContent = plural(fl.length, 'entrada');
+      const nodes = [];
+      let dia = null;
+      for (const r of fl.slice(0, audF.ver)) {
+        const d = diaTxt(r.ts);
+        if (d !== dia) { nodes.push(h('h3', { class: 'aud-day' }, d)); dia = d; }
+        nodes.push(fila(r));
+      }
+      if (!fl.length) nodes.push(h('p', { class: 'muted empty-note' }, todas.length ? 'Nada coincide con el filtro.' : 'Aún no hay nada registrado. Aquí irán apareciendo los cambios, sincronizaciones y conexiones.'));
+      if (fl.length > audF.ver) nodes.push(h('div', { class: 'row-actions' }, h('button', { type: 'button', class: 'btn ghost small', onclick: () => { audF.ver += 300; draw(); } }, 'Ver más (' + (fl.length - audF.ver) + ')')));
+      list.replaceChildren(...nodes);
+    }
+    draw();
+    const nota = h('p', { class: 'hint aud-nota' }, odConnected()
+      ? 'Se guardan los últimos ' + AUD_DIAS + ' días y se comparte entre tus dispositivos. Lo anterior se archiva solo en tu OneDrive, en la carpeta logs de la app (un fichero de texto por mes). Este dispositivo: ' + dispNombre() + '.'
+      : 'Sin OneDrive conectado, el historial se queda en este navegador y no se archiva. Este dispositivo: ' + dispNombre() + '.');
+    root.replaceChildren(stats,
+      h('section', { class: 'panel' },
+        h('div', { class: 'panel-head' }, search, dsel, count),
+        h('div', { class: 'aud-filters' }, seg), chips, list, nota));
+  }
+  function exportarAuditoria() {
+    const fl = audFiltradas();
+    if (!fl.length) { toast('No hay nada que exportar con este filtro.', 'error'); return; }
+    const q = x => '"' + String(x || '').replace(/"/g, '""') + '"';
+    const filas = [['Fecha y hora', 'Dispositivo', 'Fuente', 'Tipo', 'Descripción', 'Detalle'].map(q).join(';')]
+      .concat(fl.map(r => [fechaHora(r.ts), r.disp, (AUD_FUENTES[r.fuente] || [r.fuente])[0], (AUD_TIPOS[r.tipo] || r.tipo) + (r.auto ? ' (automático)' : ''), r.texto, (r.detalle || []).join(' | ')].map(q).join(';')));
+    const blob = new Blob(['﻿' + filas.join('\r\n')], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = h('a', { href: url, download: 'visir-auditoria-' + fechaHora(Date.now()).slice(0, 10) + '.csv' });
+    document.body.append(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
   function start() {
+    audSnap = snapDatos(); // foto inicial: desde aquí se registran los cambios
+    recordarNombres();
     bind();
     renderAll();
     ggHandleReturn();
