@@ -46,7 +46,7 @@
     od: Object.assign({ clientId: '', account: '', etag: null, syncedAt: null }, store.get(KEYS.onedrive, {})),
     odBase: store.get(KEYS.base, null),
     odState: 'idle', // idle | syncing | login | error
-    ui: Object.assign({ sidebarHidden: false, projectId: null }, store.get(KEYS.ui, {})),
+    ui: Object.assign({ sidebarHidden: false, projectId: null, view: 'personal' }, store.get(KEYS.ui, {})),
     filter: new Set(),
     syncing: false,
     editing: null,
@@ -602,6 +602,7 @@
   // ---------- render ----------
   function renderAll() {
     applyLayout();
+    applyView();
     renderProjects();
     renderSyncState();
     renderTagbar();
@@ -1487,6 +1488,176 @@
     close = openModal('Ajustes', body);
   }
 
+  // ---------- pantallas ----------
+  const VIEWS = {
+    personal: { title: 'Personal', add: 'Añadir tarea' },
+    cumpledias: { title: 'Cumpledías', eyebrow: 'Fechas', add: 'Añadir persona' }
+  };
+
+  function applyView() {
+    if (!VIEWS[S.ui.view]) S.ui.view = 'personal';
+    const v = S.ui.view, cfg = VIEWS[v], board = v === 'personal';
+    document.querySelectorAll('.nav-item[data-view]').forEach(a => {
+      const on = a.dataset.view === v;
+      a.classList.toggle('active', on);
+      if (on) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
+    });
+    document.getElementById('viewTitle').textContent = cfg.title;
+    document.getElementById('eyebrowTodoist').hidden = !board;
+    const eb = document.getElementById('eyebrowOther');
+    eb.hidden = board;
+    eb.textContent = cfg.eyebrow || '';
+    document.getElementById('addLabel').textContent = cfg.add;
+    document.getElementById('tagbar').hidden = !board;
+    document.getElementById('boardWrap').hidden = !board;
+    document.getElementById('viewCumpledias').hidden = v !== 'cumpledias';
+    if (v === 'cumpledias') renderCumpledias();
+  }
+
+  function showView(v) {
+    if (S.editing) closeDrawer();
+    S.ui.view = v;
+    saveUi();
+    if (SMALL.matches) toggleSidebar(false);
+    applyView();
+  }
+
+  // ---------- cumpledías ----------
+  // Colección "personas": { id, name, birth: 'AAAA-MM-DD' }. Pensada para crecer
+  // (p. ej. un vínculo con contactos de Google más adelante).
+  const DAY = 86400000;
+  const MILESTONE = 5000;
+  let cdFilter = 'todo'; // todo | dias | cumple
+
+  const personas = () => Object.values(S.datos.colecciones.personas || {});
+  const utcDay = ymd => { const [y, m, d] = ymd.split('-').map(Number); return Date.UTC(y, m - 1, d); };
+  const todayUtc = () => { const n = new Date(); return Date.UTC(n.getFullYear(), n.getMonth(), n.getDate()); };
+  const isLeap = y => (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0;
+  const fmtNum = n => n.toLocaleString('es-ES');
+  const fmtDay = t => new Date(t).toLocaleDateString('es-ES', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' });
+  const isYmd = v => /^\d{4}-\d{2}-\d{2}$/.test(v || '') && !isNaN(utcDay(v));
+
+  function untilText(n) {
+    if (n === 0) return 'hoy';
+    if (n === 1) return 'mañana';
+    if (n < 60) return 'en ' + n + ' días';
+    if (n < 730) return 'en ' + Math.round(n / 30.44) + ' meses';
+    return 'en ' + (n / 365.25).toFixed(1).replace('.', ',') + ' años';
+  }
+
+  // Próximos hitos de una persona (desde hoy, incluido): tres de días de vida y su próximo cumpleaños
+  function personEvents(p, today) {
+    const birth = utcDay(p.birth);
+    const lived = Math.round((today - birth) / DAY);
+    const out = [];
+    let k = Math.max(MILESTONE, Math.ceil(lived / MILESTONE) * MILESTONE);
+    for (let i = 0; i < 3; i++, k += MILESTONE) out.push({ kind: 'dias', p, value: k, date: birth + k * DAY });
+    const b = new Date(birth), bm = b.getUTCMonth(), bd = b.getUTCDate();
+    const onYear = y => Date.UTC(y, bm, bm === 1 && bd === 29 && !isLeap(y) ? 28 : bd); // 29-F: el 28 en años no bisiestos
+    let y = new Date(today).getUTCFullYear();
+    if (onYear(y) < today) y++;
+    out.push({ kind: 'cumple', p, value: y - b.getUTCFullYear(), date: onYear(y) });
+    return out.map(e => Object.assign(e, { until: Math.round((e.date - today) / DAY) }));
+  }
+
+  function renderCumpledias() {
+    const root = document.getElementById('viewCumpledias');
+    const today = todayUtc();
+    root.dataset.day = String(today);
+    const people = personas().filter(p => isYmd(p.birth)).sort((a, b) => a.name.localeCompare(b.name, 'es'));
+    const all = people.flatMap(p => personEvents(p, today)).sort((a, b) => a.date - b.date || a.p.name.localeCompare(b.p.name, 'es'));
+    const events = all.filter(e => cdFilter === 'todo' || e.kind === cdFilter);
+
+    const t = new Date(today), ty = t.getUTCFullYear(), tm = t.getUTCMonth();
+    const inMonth = events.filter(e => { const d = new Date(e.date); return d.getUTCFullYear() === ty && d.getUTCMonth() === tm; }).length;
+    const inYear = events.filter(e => new Date(e.date).getUTCFullYear() === ty).length;
+    const next = events[0];
+    const stat = (label, value, sub, cls) => h('div', { class: 'stat' + (cls ? ' ' + cls : '') },
+      h('span', { class: 'stat-label' }, label), h('span', { class: 'stat-value' }, value), h('span', { class: 'stat-sub' }, sub));
+
+    const stats = h('div', { class: 'stats' },
+      stat('Próximo', next ? (next.until === 0 ? 'Hoy' : fmtNum(next.until)) : '—', next ? (next.until === 0 ? next.p.name : (next.until === 1 ? 'día · ' : 'días · ') + next.p.name) : 'sin personas', 'accent'),
+      stat('Este mes', String(inMonth), inMonth === 1 ? 'evento' : 'eventos'),
+      stat('Este año', String(inYear), inYear === 1 ? 'evento' : 'eventos'),
+      stat('Personas', String(people.length), people.length === 1 ? 'guardada' : 'guardadas'));
+
+    const filters = h('div', { class: 'seg', role: 'group', 'aria-label': 'Filtrar' },
+      [['todo', 'Todo'], ['dias', 'Cumpledías'], ['cumple', 'Cumpleaños']].map(([k, label]) =>
+        h('button', { type: 'button', class: cdFilter === k ? 'on' : '', 'aria-pressed': cdFilter === k ? 'true' : 'false', onclick: () => { cdFilter = k; renderCumpledias(); } }, label)));
+
+    const list = h('div', { class: 'ev-list' });
+    for (const e of events.slice(0, 20)) {
+      const badge = e.kind === 'dias' ? fmtNum(e.value / 1000) + 'k' : String(e.value);
+      const what = e.kind === 'dias' ? 'Cumple ' + fmtNum(e.value) + ' días de vida' : 'Cumple ' + e.value + (e.value === 1 ? ' año' : ' años');
+      list.append(h('div', { class: 'ev' + (e.until === 0 ? ' today' : '') },
+        h('span', { class: 'ev-badge ' + e.kind, title: e.kind === 'dias' ? 'Cumpledías' : 'Cumpleaños' }, badge),
+        h('div', { class: 'ev-main' }, h('span', { class: 'ev-name' }, e.p.name), h('span', { class: 'ev-what' }, what)),
+        h('div', { class: 'ev-when' },
+          h('span', { class: 'ev-date' }, fmtDay(e.date)),
+          h('span', { class: 'ev-until' + (e.until === 0 ? ' now' : e.until <= 30 ? ' soon' : '') }, untilText(e.until)))));
+    }
+    if (!events.length) list.append(h('p', { class: 'muted empty-note' }, people.length ? 'No hay eventos con este filtro.' : 'Añade personas para ver sus próximos cumpledías y cumpleaños.'));
+
+    const plist = h('div', { class: 'people' });
+    for (const p of people) {
+      const lived = Math.round((today - utcDay(p.birth)) / DAY);
+      plist.append(h('button', { type: 'button', class: 'person', onclick: () => openPerson(p.id) },
+        h('span', { class: 'person-name' }, p.name),
+        h('span', { class: 'person-sub' }, fmtDay(utcDay(p.birth)) + ' · ' + fmtNum(lived) + ' días')));
+    }
+    if (!people.length) plist.append(h('p', { class: 'muted empty-note' }, 'Todavía no hay nadie.'));
+
+    root.replaceChildren(
+      stats,
+      h('div', { class: 'cd-grid' },
+        h('section', { class: 'panel' },
+          h('div', { class: 'panel-head' }, h('h2', null, 'Próximos'), filters),
+          list),
+        h('section', { class: 'panel' },
+          h('div', { class: 'panel-head' }, h('h2', null, 'Personas'),
+            h('button', { type: 'button', class: 'btn subtle small', onclick: () => openPerson(null) }, ICON.plus(), 'Añadir')),
+          plist)));
+  }
+
+  function openPerson(id) {
+    const cur = id ? (S.datos.colecciones.personas || {})[id] : null;
+    const name = h('input', { class: 'input', id: 'pName', type: 'text', maxlength: '60', value: cur ? cur.name : '', placeholder: 'Nombre', autocomplete: 'off' });
+    const birth = h('input', { class: 'input', id: 'pBirth', type: 'date', value: cur ? cur.birth : '', max: new Date().toISOString().slice(0, 10), min: '1900-01-01' });
+    let close = null;
+    const save = () => {
+      const n = name.value.trim(), b = birth.value;
+      if (!n) { toast('Escribe un nombre.', 'error'); name.focus(); return; }
+      if (!isYmd(b) || utcDay(b) > todayUtc() || b < '1900-01-01') { toast('Pon una fecha de nacimiento válida.', 'error'); birth.focus(); return; }
+      const rec = { id: cur ? cur.id : 'p-' + uid(), name: n, birth: b };
+      S.datos.colecciones.personas = Object.assign({}, S.datos.colecciones.personas, { [rec.id]: Object.assign({}, cur, rec) });
+      saveDatos();
+      close();
+      renderCumpledias();
+    };
+    name.addEventListener('keydown', e => { if (e.key === 'Enter') save(); });
+    const body = h('div', { style: 'display:flex;flex-direction:column;gap:14px' },
+      h('div', { class: 'field' }, h('label', { class: 'field-label', for: 'pName' }, 'Nombre'), name),
+      h('div', { class: 'field' }, h('label', { class: 'field-label', for: 'pBirth' }, 'Fecha de nacimiento'), birth),
+      h('div', { class: 'row-actions modal-foot' },
+        cur ? h('button', {
+          type: 'button', class: 'btn danger small',
+          onclick: () => {
+            if (!confirm('¿Borrar a ' + cur.name + '?')) return;
+            const rest = Object.assign({}, S.datos.colecciones.personas);
+            delete rest[cur.id];
+            S.datos.colecciones.personas = rest;
+            saveDatos();
+            close();
+            renderCumpledias();
+          }
+        }, 'Borrar') : null,
+        h('span', { class: 'spacer' }),
+        h('button', { type: 'button', class: 'btn subtle small', onclick: () => close() }, 'Cancelar'),
+        h('button', { type: 'button', class: 'btn primary small', onclick: save }, cur ? 'Guardar' : 'Añadir')));
+    close = openModal(cur ? 'Editar persona' : 'Nueva persona', body);
+    setTimeout(() => name.focus(), 50);
+  }
+
   // ---------- menú lateral ----------
   function toggleSidebar(show) {
     const app = document.getElementById('app');
@@ -1513,9 +1684,14 @@
       doSync();
     });
     document.getElementById('addBtn').addEventListener('click', () => {
+      if (S.ui.view === 'cumpledias') return openPerson(null);
       const cols = columns();
       if (cols.length) openNew(cols[0].key, true);
     });
+    document.querySelectorAll('.nav-item[data-view]').forEach(a => a.addEventListener('click', e => {
+      e.preventDefault();
+      showView(a.dataset.view);
+    }));
     document.getElementById('openTags').addEventListener('click', () => { if (SMALL.matches) toggleSidebar(false); openTagManager(); });
     document.getElementById('openSettings').addEventListener('click', () => { if (SMALL.matches) toggleSidebar(false); openSettings(); });
     document.getElementById('projectSelect').addEventListener('change', e => {
@@ -1528,7 +1704,12 @@
       if (e.key === 'Escape' && S.editing && !document.querySelector('.modal-wrap')) closeDrawer();
     });
     SMALL.addEventListener('change', applyLayout);
-    setInterval(renderSyncState, 60000);
+    setInterval(() => {
+      renderSyncState();
+      // Al cambiar de día se recalculan los cumpledías
+      const cd = document.getElementById('viewCumpledias');
+      if (!cd.hidden && cd.dataset.day !== String(todayUtc())) renderCumpledias();
+    }, 60000);
   }
 
   function start() {
