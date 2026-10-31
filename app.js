@@ -2921,6 +2921,7 @@
     if (!calCfg()) return box('Elige en Ajustes el calendario que quieres usar.', 'Elegir calendario', openCalPicker);
 
     const today = ymdOf(todayUtc());
+    if (calVista() === 'semana') return renderSemana(root, today);
     if (calMonth === null) { const t = new Date(todayUtc()); calMonth = Date.UTC(t.getUTCFullYear(), t.getUTCMonth(), 1); }
     const m = new Date(calMonth), Y = m.getUTCFullYear(), M = m.getUTCMonth();
     const first = ymdOf(calMonth), next = ymdOf(Date.UTC(Y, M + 1, 1));
@@ -2939,10 +2940,9 @@
       h('h2', null, cap(new Date(calMonth).toLocaleDateString('es-ES', { month: 'long', year: 'numeric', timeZone: 'UTC' }))),
       h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Mes siguiente', onclick: () => { calMonth = Date.UTC(Y, M + 1, 1); renderCal(); } }, ICON.right()),
       h('button', { type: 'button', class: 'btn subtle small', onclick: () => { calMonth = null; calSel = null; renderCal(); } }, 'Hoy'),
+      calVistaSeg(),
       calLoading ? h('span', { class: 'muted' }, 'Leyendo…') : null,
-      h('div', { class: 'legend cal-legend' },
-        h('span', { class: 'lg', style: '--c:#E68AC4' }, 'Cumpleaños'), h('span', { class: 'lg', style: '--c:#F2B35B' }, 'Cumpledías'), h('span', { class: 'lg', style: '--c:' + SANTO_COLOR }, 'Santos'),
-        h('span', { class: 'lg', style: '--c:#F5D76E' }, 'Gastos'), h('span', { class: 'lg', style: '--c:#DBF266' }, 'Tareas')));
+      calLeyenda());
 
     const grid = h('div', { class: 'cal-grid' }, DIAS_SEM.map(d => h('span', { class: 'cal-wd' }, d)));
     const offset = (m.getUTCDay() + 6) % 7; // lunes = 0
@@ -2963,7 +2963,7 @@
       grid.append(cell);
     }
 
-    const dayEvs = S.cal.events.filter(e => evOnDay(e, calSel)).sort((a, b) => (a.allDay === b.allDay ? a.start.localeCompare(b.start) : a.allDay ? -1 : 1));
+    const dayEvs = evsDelDia(calSel);
     const evInner = e => [h('span', { class: 'cat-dot', style: '--c:' + evColor(e) }),
       h('span', { class: 'ev-main' }, h('span', { class: 'ev-name' }, e.title), h('span', { class: 'ev-what' },
         [evTime(e), e.serie && !e.key ? 'se repite' : '', evOrigin(e) ? 'lo gestiona la app (' + evOrigin(e).toLowerCase() + ')' : ''].filter(Boolean).join(' · ')))];
@@ -2974,6 +2974,67 @@
     root.replaceChildren(
       h('section', { class: 'panel' }, nav, grid),
       h('section', { class: 'panel' }, h('div', { class: 'panel-head' }, h('h2', null, cap(new Date(utcDay(calSel)).toLocaleDateString('es-ES', { weekday: 'long', day: 'numeric', month: 'long', timeZone: 'UTC' })))), list));
+  }
+
+  // Vista: mes o semana (recordada por dispositivo en mp.ui.calVista; por defecto semana en el móvil)
+  const PHONE = window.matchMedia('(max-width: 700px)');
+  const calVista = () => S.ui.calVista === 'mes' || S.ui.calVista === 'semana' ? S.ui.calVista : PHONE.matches ? 'semana' : 'mes';
+  const evsDelDia = ymd => S.cal.events.filter(e => evOnDay(e, ymd)).sort((a, b) => (a.allDay === b.allDay ? a.start.localeCompare(b.start) : a.allDay ? -1 : 1));
+  const abrirEvento = e => e.key ? openAppEvent(e) : openCalEvent(e);
+  function calVistaSeg() {
+    const v = calVista();
+    return h('div', { class: 'seg cal-vista', role: 'group', 'aria-label': 'Vista del calendario' },
+      [['mes', 'Mes'], ['semana', 'Semana']].map(([k, l]) => h('button', {
+        type: 'button', class: v === k ? 'on' : '', 'aria-pressed': v === k ? 'true' : 'false',
+        onclick: () => {
+          S.ui.calVista = k; saveUi();
+          if (k === 'mes' && calSel) { const d = new Date(utcDay(calSel)); calMonth = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1); }
+          renderCal();
+        }
+      }, l)));
+  }
+  const calLeyenda = () => h('div', { class: 'legend cal-legend' },
+    h('span', { class: 'lg', style: '--c:#E68AC4' }, 'Cumpleaños'), h('span', { class: 'lg', style: '--c:#F2B35B' }, 'Cumpledías'), h('span', { class: 'lg', style: '--c:' + SANTO_COLOR }, 'Santos'),
+    h('span', { class: 'lg', style: '--c:#F5D76E' }, 'Gastos'), h('span', { class: 'lg', style: '--c:#DBF266' }, 'Tareas'));
+
+  // Vista de semana (lunes a domingo): cada día con sus eventos con el nombre entero.
+  // En el móvil, un día debajo de otro; en pantallas anchas, siete columnas.
+  function renderSemana(root, today) {
+    if (!calSel) calSel = today;
+    const lun = utcDay(calSel) - ((new Date(utcDay(calSel)).getUTCDay() + 6) % 7) * DAY;
+    const dias = Array.from({ length: 7 }, (_, i) => ymdOf(lun + i * DAY));
+    const desde = dias[0], hasta = addDays(dias[6], 1);
+    if ((!S.cal.from || desde < S.cal.from || hasta > S.cal.to) && ggTokenOk() && !calLoading) {
+      calLoading = true;
+      calFetch(addDays(desde, -31), addDays(hasta, 62))
+        .catch(e => toast(e.message || 'No se pudo leer el calendario.', 'error'))
+        .finally(() => { calLoading = false; if (S.ui.view === 'calendario') renderCal(); });
+    }
+    const mover = n => { calSel = addDays(calSel, n); const d = new Date(utcDay(calSel)); calMonth = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1); renderCal(); };
+    const f = (ymd, o) => new Date(utcDay(ymd)).toLocaleDateString('es-ES', Object.assign({ timeZone: 'UTC' }, o));
+    const a = dias[0], b = dias[6];
+    const titulo = a.slice(0, 7) === b.slice(0, 7) ? (+a.slice(8)) + ' – ' + f(b, { day: 'numeric', month: 'short', year: 'numeric' })
+      : a.slice(0, 4) === b.slice(0, 4) ? f(a, { day: 'numeric', month: 'short' }) + ' – ' + f(b, { day: 'numeric', month: 'short', year: 'numeric' })
+      : f(a, { day: 'numeric', month: 'short', year: 'numeric' }) + ' – ' + f(b, { day: 'numeric', month: 'short', year: 'numeric' });
+    const nav = h('div', { class: 'cal-nav' },
+      h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Semana anterior', onclick: () => mover(-7) }, ICON.left()),
+      h('h2', null, titulo.replace(/\./g, '')),
+      h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Semana siguiente', onclick: () => mover(7) }, ICON.right()),
+      h('button', { type: 'button', class: 'btn subtle small', onclick: () => { calMonth = null; calSel = null; renderCal(); } }, 'Hoy'),
+      calVistaSeg(),
+      calLoading ? h('span', { class: 'muted' }, 'Leyendo…') : null,
+      calLeyenda());
+    const semana = h('div', { class: 'cal-week' }, dias.map(ymd => {
+      const evs = evsDelDia(ymd);
+      return h('div', { class: 'wk-day' + (ymd === today ? ' today' : '') + (ymd === calSel ? ' sel' : '') },
+        h('button', { type: 'button', class: 'wk-head', 'aria-label': cap(f(ymd, { weekday: 'long', day: 'numeric', month: 'long' })), onclick: () => { calSel = ymd; renderCal(); } },
+          h('span', { class: 'wk-wd' }, f(ymd, { weekday: 'short' }).replace('.', '')),
+          h('span', { class: 'wk-num' }, String(+ymd.slice(8)))),
+        h('div', { class: 'wk-evs' }, evs.length ? evs.map(e => h('button', { type: 'button', class: 'wk-ev', style: '--c:' + evColor(e), onclick: () => abrirEvento(e) },
+          e.allDay ? null : h('span', { class: 'wk-time' }, evTime(e)),
+          h('span', { class: 'wk-title' }, e.title))) : h('span', { class: 'wk-none' }, 'Sin eventos')));
+    }));
+    root.replaceChildren(h('section', { class: 'panel' }, nav, semana));
   }
 
   // Evento creado por la app: ventana de solo lectura con acceso a lo que lo genera

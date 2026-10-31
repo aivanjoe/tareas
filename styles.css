@@ -619,3 +619,26 @@ a.btn { text-decoration: none; }
 .compra-item.pending { opacity: 0.55; }
 .compra-check { flex-basis: 20px; width: 20px; height: 20px; }
 .compra-name { font-size: 15px; font-weight: 600; color: var(--text); overflow-wrap: anywhere; }
+
+/* Calendario: vista de semana */
+.cal-vista button { padding: 5px 12px; }
+.cal-week { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 6px; }
+.wk-day { display: flex; flex-direction: column; min-height: max(180px, calc(100dvh - 260px)); background: var(--card); border: 1px solid var(--line); border-radius: 10px; min-width: 0; }
+.wk-day.sel { border-color: color-mix(in srgb, var(--blue) 60%, transparent); }
+.wk-head { display: flex; align-items: baseline; gap: 6px; padding: 8px 10px 6px; border: none; background: none; font: inherit; color: var(--muted); cursor: pointer; text-align: left; }
+.wk-wd { font-size: 11.5px; font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase; }
+.wk-num { font-size: 15px; font-weight: 800; color: var(--text); min-width: 26px; height: 26px; display: inline-grid; place-items: center; border-radius: 999px; }
+.wk-day.today .wk-num { background: var(--accent); color: var(--bg); }
+.wk-evs { display: flex; flex-direction: column; gap: 4px; padding: 0 6px 8px; min-width: 0; }
+.wk-ev { display: flex; flex-direction: column; gap: 1px; padding: 4px 7px; border: none; border-left: 3px solid var(--c); border-radius: 6px; background: color-mix(in srgb, var(--c) 13%, transparent); color: var(--text); font: inherit; font-size: 12.5px; font-weight: 600; text-align: left; cursor: pointer; overflow-wrap: anywhere; }
+.wk-ev:hover { background: color-mix(in srgb, var(--c) 22%, transparent); }
+.wk-time { font-size: 11px; font-weight: 700; color: var(--text2); }
+.wk-none { padding: 2px 4px; font-size: 12px; color: var(--muted); }
+@media (max-width: 700px) {
+  .cal-week { grid-template-columns: minmax(0, 1fr); }
+  .wk-day { flex-direction: row; min-height: 0; }
+  .wk-head { flex: 0 0 54px; flex-direction: column; align-items: center; gap: 2px; padding: 8px 4px; }
+  .wk-evs { flex: 1; padding: 8px 8px 8px 0; justify-content: center; }
+  .wk-ev { font-size: 14px; padding: 6px 9px; }
+  .wk-time { font-size: 12px; }
+}
