@@ -1,17 +1,28 @@
-/* Mi panel — v1 (Personal · Todoist)
+/* Mi panel
    - Tareas y secciones: Todoist (API v1, endpoint /sync)
-   - Etiquetas y colores: solo en este navegador (localStorage)
+   - Datos propios de la app (etiquetas, ...): almacén local por colecciones,
+     sincronizado con OneDrive personal (carpeta de la app) si el usuario lo conecta
 */
 (() => {
   'use strict';
+
+  // Si esta página se carga dentro de la ventana de login de Microsoft, no arranca la app:
+  // la ventana principal (MSAL) lee la respuesta de la dirección y cierra esta ventana
+  if (window.opener && window.opener !== window && /(^|[#?&])(code|error)=/.test(location.hash + location.search)) return;
 
   const API_URL = 'https://api.todoist.com/api/v1/sync';
   const KEYS = {
     token: 'mp.todoist.token',
     cache: 'mp.todoist.cache',
-    tags: 'mp.tags',
+    datos: 'mp.datos',
+    base: 'mp.datos.base',
+    onedrive: 'mp.onedrive',
     ui: 'mp.ui'
   };
+  const LEGACY_TAGS_KEY = 'mp.tags'; // formato anterior de las etiquetas, se migra al almacén
+  const SCHEMA = 1; // versión del formato del almacén
+  const GRAPH_FILE = 'https://graph.microsoft.com/v1.0/me/drive/special/approot:/datos.json';
+  const OD_SCOPES = ['Files.ReadWrite.AppFolder', 'User.Read'];
   const PALETTE = ['#DBF266', '#7FA2E0', '#F2B35B', '#B39DF0', '#5CCFB8', '#F0857A',
                    '#E68AC4', '#8BD17C', '#6FC3E8', '#D9A77A', '#F5D76E', '#C9D0DC'];
   const SMALL = window.matchMedia('(max-width: 1099px)');
@@ -34,7 +45,11 @@
   const S = {
     token: store.get(KEYS.token, ''),
     data: store.get(KEYS.cache, null),
-    tags: normalizeTags(store.get(KEYS.tags, null)),
+    datos: loadDatos(),
+    tags: null,
+    od: Object.assign({ clientId: '', account: '', etag: null, syncedAt: null }, store.get(KEYS.onedrive, {})),
+    odBase: store.get(KEYS.base, null),
+    odState: 'idle', // idle | syncing | login | error
     ui: Object.assign({ sidebarHidden: false, projectId: null }, store.get(KEYS.ui, {})),
     filter: new Set(),
     syncing: false,
@@ -58,7 +73,103 @@
     return out;
   }
 
-  const saveTags = () => store.set(KEYS.tags, S.tags);
+  S.tags = tagsFromDoc(S.datos);
+
+  // ---------- almacén de datos de la app ----------
+  // Documento: { schema, colecciones: { [nombre]: { [id]: registro } } }.
+  // Cada registro lleva su id; la fusión con OneDrive trabaja registro a registro.
+  function emptyDoc() { return { schema: SCHEMA, colecciones: {} }; }
+
+  function normalizeDoc(d) {
+    const out = emptyDoc();
+    if (!d || typeof d !== 'object') return out;
+    out.schema = Number.isInteger(d.schema) ? d.schema : SCHEMA;
+    const cols = d.colecciones && typeof d.colecciones === 'object' ? d.colecciones : {};
+    for (const [name, recs] of Object.entries(cols)) {
+      if (!recs || typeof recs !== 'object' || Array.isArray(recs)) continue;
+      out.colecciones[name] = {};
+      for (const [id, r] of Object.entries(recs)) {
+        if (r && typeof r === 'object' && r.id === id) out.colecciones[name][id] = r;
+      }
+    }
+    return out;
+  }
+
+  function loadDatos() {
+    const saved = store.get(KEYS.datos, null);
+    if (saved) return normalizeDoc(saved);
+    // Primera vez con el almacén: se traen las etiquetas del formato anterior
+    const doc = emptyDoc();
+    writeTags(doc, normalizeTags(store.get(LEGACY_TAGS_KEY, null)));
+    store.set(KEYS.datos, doc);
+    return doc;
+  }
+
+  // Etiquetas en el almacén: "etiquetas" ({id, name, color}), "asignaciones" ({id: taskId, tags: [...]})
+  // y el orden aparte, en "orden" ({id: 'etiquetas', ids: [...]}), para que reordenar o borrar
+  // no cuente como cambio en cada etiqueta al fusionar con otro dispositivo.
+  function writeTags(doc, tags) {
+    const etiquetas = {}, asignaciones = {};
+    for (const t of tags.list) etiquetas[t.id] = { id: t.id, name: t.name, color: t.color };
+    for (const [taskId, ids] of Object.entries(tags.assign)) {
+      if (taskId.startsWith('tmp-') || !ids.length) continue;
+      asignaciones[taskId] = { id: taskId, tags: ids.slice() };
+    }
+    doc.colecciones.etiquetas = etiquetas;
+    doc.colecciones.asignaciones = asignaciones;
+    doc.colecciones.orden = Object.assign({}, doc.colecciones.orden, { etiquetas: { id: 'etiquetas', ids: tags.list.map(t => t.id) } });
+  }
+
+  function tagsFromDoc(doc) {
+    const ord = ((doc.colecciones.orden || {}).etiquetas || {}).ids || [];
+    const pos = id => { const i = ord.indexOf(id); return i < 0 ? Infinity : i; };
+    const et = Object.values(doc.colecciones.etiquetas || {}).sort((a, b) => pos(a.id) - pos(b.id) || a.name.localeCompare(b.name));
+    const assign = {};
+    for (const r of Object.values(doc.colecciones.asignaciones || {})) assign[r.id] = r.tags;
+    return normalizeTags({ list: et, assign });
+  }
+
+  // JSON con las claves ordenadas, para comparar registros sin depender del orden de las propiedades
+  function stable(v) {
+    if (v === undefined) return '';
+    if (Array.isArray(v)) return '[' + v.map(stable).join(',') + ']';
+    if (v && typeof v === 'object') return '{' + Object.keys(v).sort().map(k => JSON.stringify(k) + ':' + stable(v[k])).join(',') + '}';
+    return JSON.stringify(v);
+  }
+
+  // Fusión a tres bandas, registro a registro: si solo cambió un lado gana ese cambio
+  // (también los borrados); si cambiaron los dos, gana este dispositivo.
+  function mergeDocs(base, local, remote) {
+    const out = emptyDoc();
+    out.schema = Math.max(local.schema, remote.schema);
+    const names = new Set([...Object.keys(base.colecciones), ...Object.keys(local.colecciones), ...Object.keys(remote.colecciones)]);
+    for (const name of names) {
+      const b = base.colecciones[name] || {}, l = local.colecciones[name] || {}, r = remote.colecciones[name] || {};
+      const res = {};
+      for (const id of new Set([...Object.keys(b), ...Object.keys(l), ...Object.keys(r)])) {
+        const sb = stable(b[id]), sl = stable(l[id]), sr = stable(r[id]);
+        const pick = sl === sb ? r[id] : (sr === sb ? l[id] : l[id]);
+        if (pick !== undefined) res[id] = pick;
+      }
+      out.colecciones[name] = res;
+    }
+    return out;
+  }
+
+  const saveDatos = () => { store.set(KEYS.datos, S.datos); odSchedulePush(); };
+  const saveOd = () => store.set(KEYS.onedrive, S.od);
+  const saveTags = () => {
+    writeTags(S.datos, S.tags);
+    saveDatos();
+  };
+  // Tras traer cambios de otro dispositivo; conserva las asignaciones de tareas aún sin crear en Todoist
+  function applyDatos(doc) {
+    const pendientes = Object.entries(S.tags.assign).filter(([k]) => k.startsWith('tmp-'));
+    S.datos = doc;
+    store.set(KEYS.datos, S.datos);
+    S.tags = tagsFromDoc(S.datos);
+    for (const [k, v] of pendientes) S.tags.assign[k] = v;
+  }
   const saveUi = () => store.set(KEYS.ui, S.ui);
   const saveCache = () => store.set(KEYS.cache, S.data);
 
@@ -251,6 +362,205 @@
     await doSync({ silent: true });
   }
 
+  // ---------- OneDrive (cuenta personal de Microsoft) ----------
+  // Login con MSAL.js; el fichero datos.json vive en la carpeta de la app (/Aplicaciones/<app>).
+  // Escritura con If-Match (eTag): si otro dispositivo escribió antes, se vuelve a leer y se fusiona.
+  class OdError extends Error {
+    constructor(kind, message) { super(message); this.kind = kind; }
+  }
+  let msalApp = null;     // PublicClientApplication ya inicializada
+  let msalLoading = null; // promesa de carga e inicialización
+  let odTimer = null;
+  let odAgain = false;
+
+  const odConnected = () => !!(S.od.clientId && S.od.account);
+  const appUrl = () => location.origin + location.pathname.replace(/index\.html$/, '');
+
+  // Carga msal-browser.min.js solo si el usuario ha configurado OneDrive
+  function loadMsal() {
+    if (msalLoading) return msalLoading;
+    msalLoading = new Promise((resolve, reject) => {
+      if (window.msal) return resolve();
+      const sc = document.createElement('script');
+      sc.src = 'msal-browser.min.js';
+      sc.onload = resolve;
+      sc.onerror = () => reject(new OdError('load', 'No se pudo cargar el módulo de inicio de sesión de Microsoft.'));
+      document.head.append(sc);
+    }).then(async () => {
+      const app = new msal.PublicClientApplication({
+        auth: { clientId: S.od.clientId, authority: 'https://login.microsoftonline.com/consumers', redirectUri: appUrl() },
+        cache: { cacheLocation: 'localStorage' }
+      });
+      await app.initialize();
+      msalApp = app;
+      // Vuelta de un login por redirección (si el navegador bloqueó la ventana emergente)
+      const res = await app.handleRedirectPromise();
+      if (res && res.account) odLoggedIn(res.account);
+      return app;
+    });
+    msalLoading.catch(() => { msalLoading = null; });
+    return msalLoading;
+  }
+
+  function odAccount() {
+    if (!msalApp) return null;
+    return msalApp.getActiveAccount() || msalApp.getAllAccounts()[0] || null;
+  }
+
+  function odLoggedIn(account) {
+    msalApp.setActiveAccount(account);
+    S.od.account = account.username || account.name || 'Cuenta de Microsoft';
+    saveOd();
+    S.odState = 'idle';
+    renderSyncState();
+    syncDatos();
+  }
+
+  // Se llama directamente desde un clic: la ventana emergente debe abrirse sin esperas previas
+  function odConnect() {
+    if (!msalApp) {
+      toast('Preparando el inicio de sesión. Vuelve a pulsar en un momento.');
+      loadMsal().catch(e => toast(e.message, 'error'));
+      return;
+    }
+    const acc = odAccount();
+    const req = { scopes: OD_SCOPES, prompt: 'select_account' };
+    if (acc) req.loginHint = acc.username;
+    msalApp.loginPopup(req)
+      .then(res => odLoggedIn(res.account))
+      .catch(e => {
+        const code = e && e.errorCode;
+        if (code === 'popup_window_error' || code === 'empty_window_error') return msalApp.loginRedirect(req);
+        if (code === 'user_cancelled') return;
+        toast('No se pudo conectar con OneDrive: ' + (e.message || code), 'error');
+      });
+  }
+
+  async function odDisconnect() {
+    try {
+      if (!msalApp) await loadMsal();
+      const acc = odAccount();
+      if (acc) await msalApp.clearCache({ account: acc });
+    } catch (e) { /* aunque falle, se olvida la cuenta en la app */ }
+    S.od.account = '';
+    S.od.etag = null;
+    S.od.syncedAt = null;
+    saveOd();
+    S.odBase = null;
+    localStorage.removeItem(KEYS.base);
+    S.odState = 'idle';
+    renderSyncState();
+  }
+
+  async function odToken() {
+    if (!msalApp) await loadMsal();
+    const acc = odAccount();
+    if (!acc) throw new OdError('login', 'Conecta de nuevo OneDrive.');
+    try {
+      const r = await msalApp.acquireTokenSilent({ scopes: OD_SCOPES, account: acc });
+      return r.accessToken;
+    } catch (e) {
+      if (e instanceof msal.InteractionRequiredAuthError || (e && /interaction_required|login_required|consent_required|no_tokens_found/.test(e.errorCode || ''))) {
+        throw new OdError('login', 'La sesión de OneDrive ha caducado. Vuelve a conectar.');
+      }
+      throw new OdError('network', 'No se pudo conectar con Microsoft. Revisa la conexión.');
+    }
+  }
+
+  async function graphFetch(url, opts) {
+    try { return await fetch(url, opts); }
+    catch (e) { throw new OdError('network', 'No se pudo conectar con OneDrive. Revisa la conexión.'); }
+  }
+
+  // Lee datos.json: null si aún no existe
+  async function odPull(token) {
+    const r = await graphFetch(GRAPH_FILE, { headers: { Authorization: 'Bearer ' + token } });
+    if (r.status === 404) return null;
+    if (r.status === 401) throw new OdError('login', 'La sesión de OneDrive ha caducado. Vuelve a conectar.');
+    if (!r.ok) throw new OdError('http', 'OneDrive respondió con un error (' + r.status + ').');
+    const meta = await r.json();
+    const url = meta['@microsoft.graph.downloadUrl'];
+    if (!url) throw new OdError('http', 'OneDrive no devolvió el fichero de datos.');
+    const c = await graphFetch(url);
+    if (!c.ok) throw new OdError('http', 'No se pudo descargar el fichero de datos (' + c.status + ').');
+    let json;
+    try { json = await c.json(); } catch (e) { throw new OdError('format', 'El fichero de datos de OneDrive está dañado.'); }
+    return { etag: meta.eTag, doc: normalizeDoc(json) };
+  }
+
+  // Escribe datos.json solo si nadie lo ha cambiado desde etag (o si no existe, cuando etag es null)
+  async function odPush(token, doc, etag) {
+    const headers = { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' };
+    if (etag) headers['If-Match'] = etag; else headers['If-None-Match'] = '*';
+    const body = JSON.stringify({ app: 'mi-panel', schema: doc.schema, guardado: new Date().toISOString(), colecciones: doc.colecciones });
+    const r = await graphFetch(GRAPH_FILE + ':/content', { method: 'PUT', headers, body });
+    if (r.status === 412 || r.status === 409) return { conflict: true };
+    if (r.status === 401) throw new OdError('login', 'La sesión de OneDrive ha caducado. Vuelve a conectar.');
+    if (!r.ok) throw new OdError('http', 'OneDrive no aceptó los cambios (' + r.status + ').');
+    const meta = await r.json();
+    return { etag: meta.eTag };
+  }
+
+  async function syncDatos(opts = {}) {
+    if (!odConnected()) return;
+    if (S.odState === 'syncing') { odAgain = true; return; }
+    clearTimeout(odTimer);
+    S.odState = 'syncing';
+    renderSyncState();
+    try {
+      const token = await odToken();
+      let done = false;
+      for (let i = 0; i < 4 && !done; i++) {
+        const remote = await odPull(token);
+        if (remote && remote.doc.schema > SCHEMA) {
+          throw new OdError('schema', 'Los datos de OneDrive son de una versión más nueva de la app. Recarga la página.');
+        }
+        const base = normalizeDoc(S.odBase);
+        let merged = S.datos;
+        if (remote && remote.etag !== S.od.etag) merged = mergeDocs(base, S.datos, remote.doc);
+        if (stable(merged.colecciones) !== stable(S.datos.colecciones)) {
+          applyDatos(merged);
+          renderAll();
+          if (S.editing) renderDrawer();
+        }
+        if (remote && stable(merged.colecciones) === stable(remote.doc.colecciones)) {
+          S.odBase = remote.doc;
+          S.od.etag = remote.etag;
+          done = true;
+        } else {
+          const res = await odPush(token, merged, remote ? remote.etag : null);
+          if (res.conflict) continue; // otro dispositivo escribió entretanto: leer y fusionar otra vez
+          S.odBase = normalizeDoc(merged);
+          S.od.etag = res.etag;
+          done = true;
+        }
+      }
+      if (!done) throw new OdError('conflict', 'OneDrive cambió varias veces seguidas. Vuelve a sincronizar.');
+      store.set(KEYS.base, S.odBase);
+      S.od.syncedAt = Date.now();
+      saveOd();
+      S.odState = 'idle';
+      if (opts.notify) toast('Datos sincronizados con OneDrive');
+    } catch (e) {
+      S.odState = e.kind === 'login' ? 'login' : 'error';
+      if (e.kind === 'login') toast(e.message, 'error', { label: 'Conectar', fn: odConnect }, 10000);
+      else toast(e.message || 'Error al sincronizar con OneDrive.', 'error');
+    } finally {
+      renderSyncState();
+      if (odAgain) { odAgain = false; odSchedulePush(); }
+    }
+  }
+
+  // Tras un cambio en los datos de la app se sube a OneDrive al poco (agrupando cambios seguidos)
+  function odSchedulePush() {
+    if (!odConnected() || S.odState === 'login') return;
+    if (S.odState === 'syncing') { odAgain = true; return; }
+    clearTimeout(odTimer);
+    odTimer = setTimeout(() => syncDatos(), 1500);
+  }
+
+  const odPending = () => !S.odBase || stable(S.datos.colecciones) !== stable(normalizeDoc(S.odBase).colecciones);
+
   // ---------- datos derivados ----------
   function currentProjectId() {
     if (!S.data) return null;
@@ -313,11 +623,23 @@
 
   function renderSyncState() {
     const when = S.data ? relTime(S.data.syncedAt) : 'nunca';
-    document.getElementById('syncInfo').textContent = S.syncing ? 'Sincronizando…' : 'Sincronizado ' + when;
+    const busy = S.syncing || S.odState === 'syncing';
+    document.getElementById('syncInfo').textContent = busy ? 'Sincronizando…' : 'Sincronizado ' + when;
     document.getElementById('syncSide').textContent = when;
+    const od = document.getElementById('syncOd');
+    od.hidden = !odConnected();
+    if (odConnected()) {
+      const st = S.odState === 'syncing' ? 'sincronizando…'
+        : S.odState === 'login' ? 'reconectar'
+        : S.odState === 'error' ? 'con error'
+        : odPending() ? 'cambios sin subir'
+        : relTime(S.od.syncedAt);
+      document.getElementById('syncOdState').textContent = st;
+      od.classList.toggle('warn', S.odState === 'login' || S.odState === 'error');
+    }
     const btn = document.getElementById('syncBtn');
-    btn.disabled = S.syncing;
-    btn.classList.toggle('is-syncing', S.syncing);
+    btn.disabled = busy;
+    btn.classList.toggle('is-syncing', busy);
   }
 
   function renderTagbar() {
@@ -984,7 +1306,7 @@
           h('div', { class: 'tm-new' }, newSwatch, newName,
             h('button', { type: 'button', class: 'btn primary small', onclick: add }, 'Añadir')),
           newPaletteSlot),
-        h('p', { class: 'muted' }, 'Arrastra por el asa para cambiar el orden. Las etiquetas se guardan en este navegador.'));
+        h('p', { class: 'muted' }, 'Arrastra por el asa para cambiar el orden. Las etiquetas se guardan en este navegador y, si lo conectas, en OneDrive.'));
 
       if (listSortable) listSortable.destroy();
       listSortable = Sortable.create(list, {
@@ -1009,6 +1331,79 @@
     });
   }
 
+  // Ajustes · OneDrive
+  function odSection() {
+    const box = h('div', { class: 'modal-section' });
+    const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+    const draw = () => {
+      const intro = h('p', { class: 'muted' }, 'Guarda los datos de la app en tu OneDrive personal (en una carpeta propia de la app) y los sincroniza entre tus dispositivos.');
+      if (!S.od.clientId) {
+        const input = h('input', { class: 'input', type: 'text', placeholder: 'Id. de aplicación (cliente)', autocomplete: 'off', spellcheck: 'false', 'aria-label': 'Id. de aplicación (cliente)' });
+        const saveId = () => {
+          const v = input.value.trim();
+          if (!GUID.test(v)) { toast('El Id. de aplicación tiene este formato: 1234abcd-12ab-34cd-56ef-1234567890ab', 'error'); input.focus(); return; }
+          S.od.clientId = v;
+          saveOd();
+          loadMsal().then(draw).catch(e => toast(e.message, 'error'));
+          draw();
+        };
+        input.addEventListener('keydown', e => { if (e.key === 'Enter') saveId(); });
+        box.replaceChildren(h('h3', null, 'OneDrive'), intro,
+          h('p', { class: 'muted' }, 'Pega el Id. de aplicación (cliente) del registro que creaste en Microsoft Entra.'),
+          input,
+          h('div', { class: 'row-actions' }, h('button', { type: 'button', class: 'btn ghost small', onclick: saveId }, 'Guardar')));
+        return;
+      }
+
+      const changeId = h('button', {
+        type: 'button', class: 'btn subtle small',
+        onclick: async () => {
+          if (!confirm('¿Cambiar el Id. de aplicación? Se desconectará OneDrive en este navegador.')) return;
+          await odDisconnect();
+          S.od.clientId = '';
+          saveOd();
+          msalApp = null; msalLoading = null;
+          location.reload();
+        }
+      }, 'Cambiar Id. de aplicación');
+
+      if (!odConnected()) {
+        box.replaceChildren(h('h3', null, 'OneDrive'), intro,
+          h('p', { class: 'muted' }, 'Al conectar, tus datos de este navegador se juntan con los que ya haya en OneDrive; no se pierde nada.'),
+          h('div', { class: 'row-actions' },
+            h('button', { type: 'button', class: 'btn primary small', onclick: () => { odConnect(); } }, 'Conectar con OneDrive'),
+            changeId));
+        return;
+      }
+
+      const estado = S.odState === 'syncing' ? 'Sincronizando…'
+        : S.odState === 'login' ? 'La sesión ha caducado: pulsa Reconectar.'
+        : S.odState === 'error' ? 'La última sincronización falló.'
+        : odPending() ? 'Hay cambios sin subir.'
+        : 'Última sincronización: ' + relTime(S.od.syncedAt) + '.';
+      box.replaceChildren(h('h3', null, 'OneDrive'),
+        h('p', { class: 'muted' }, 'Conectado como ', h('strong', null, S.od.account), '.'),
+        h('p', { class: 'muted' }, estado),
+        h('div', { class: 'row-actions' },
+          S.odState === 'login'
+            ? h('button', { type: 'button', class: 'btn primary small', onclick: () => { odConnect(); } }, 'Reconectar')
+            : h('button', { type: 'button', class: 'btn ghost small', onclick: () => syncDatos({ notify: true }) }, 'Sincronizar ahora'),
+          h('button', {
+            type: 'button', class: 'btn subtle small',
+            onclick: async () => {
+              if (!confirm('¿Desconectar OneDrive en este navegador? Tus datos se quedan en OneDrive y en este navegador.')) return;
+              await odDisconnect();
+              draw();
+            }
+          }, 'Desconectar')));
+    };
+    draw();
+    // Mientras Ajustes está abierto, refleja los cambios de estado (login, sincronización)
+    const timer = setInterval(() => { if (!box.isConnected) clearInterval(timer); else if (!(box.contains(document.activeElement) && document.activeElement.tagName === 'INPUT')) draw(); }, 1000);
+    return box;
+  }
+
   // Ajustes
   function openSettings() {
     const fileInput = h('input', { type: 'file', accept: 'application/json,.json', hidden: true });
@@ -1017,13 +1412,23 @@
       if (!file) return;
       try {
         const parsed = JSON.parse(await file.text());
-        const tags = normalizeTags(parsed && parsed.tags ? parsed.tags : parsed);
-        if (!tags.list.length) throw new Error('vacío');
-        if (!confirm('Se sustituirán tus etiquetas actuales por las del fichero (' + tags.list.length + ' etiquetas). ¿Continuar?')) return;
-        S.tags = tags;
-        saveTags();
+        if (parsed && parsed.datos) {
+          // Copia completa del almacén
+          const doc = normalizeDoc(parsed.datos);
+          if (doc.schema > SCHEMA) throw new Error('versión');
+          if (!confirm('Se sustituirán todos los datos de la app por los del fichero. ¿Continuar?')) return;
+          applyDatos(doc);
+          saveDatos();
+        } else {
+          // Formato antiguo: solo etiquetas
+          const tags = normalizeTags(parsed && parsed.tags ? parsed.tags : parsed);
+          if (!tags.list.length) throw new Error('vacío');
+          if (!confirm('Se sustituirán tus etiquetas actuales por las del fichero (' + tags.list.length + ' etiquetas). ¿Continuar?')) return;
+          S.tags = tags;
+          saveTags();
+        }
         renderAll();
-        toast('Etiquetas importadas');
+        toast('Datos importados');
       } catch (e) {
         toast('El fichero no tiene un formato válido.', 'error');
       } finally {
@@ -1031,10 +1436,10 @@
       }
     });
 
-    const exportTags = () => {
-      const blob = new Blob([JSON.stringify({ app: 'mi-panel', version: 1, exportedAt: new Date().toISOString(), tags: S.tags }, null, 2)], { type: 'application/json' });
+    const exportData = () => {
+      const blob = new Blob([JSON.stringify({ app: 'mi-panel', version: 2, exportedAt: new Date().toISOString(), datos: S.datos }, null, 2)], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
-      const a = h('a', { href: url, download: 'mi-panel-etiquetas.json' });
+      const a = h('a', { href: url, download: 'mi-panel-datos.json' });
       document.body.append(a);
       a.click();
       a.remove();
@@ -1049,22 +1454,27 @@
         h('p', { class: 'muted' }, 'Token: ' + masked),
         h('div', { class: 'row-actions' },
           h('button', { type: 'button', class: 'btn ghost small', onclick: () => { close(); openSetup(); } }, 'Cambiar token'))),
+      odSection(),
       h('div', { class: 'modal-section' },
-        h('h3', null, 'Copia de las etiquetas'),
-        h('p', { class: 'muted' }, 'Tus etiquetas solo están en este navegador. Exporta una copia para llevarlas a otro dispositivo o como respaldo.'),
+        h('h3', null, 'Copia de seguridad'),
+        h('p', { class: 'muted' }, 'Exporta todos los datos de la app (etiquetas y lo que se añada) en un fichero, o importa una copia. Importar sustituye los datos actuales.'),
         h('div', { class: 'row-actions' },
-          h('button', { type: 'button', class: 'btn ghost small', onclick: exportTags }, 'Exportar'),
+          h('button', { type: 'button', class: 'btn ghost small', onclick: exportData }, 'Exportar'),
           h('button', { type: 'button', class: 'btn ghost small', onclick: () => fileInput.click() }, 'Importar'),
           fileInput)),
       h('div', { class: 'modal-section' },
         h('h3', null, 'Este navegador'),
-        h('p', { class: 'muted' }, 'Borra el token, las etiquetas y la copia local de tareas de este navegador. En Todoist no se borra nada.'),
+        h('p', { class: 'muted' }, 'Borra de este navegador el token, los datos de la app, la sesión de OneDrive y la copia local de tareas. En Todoist y OneDrive no se borra nada.'),
         h('div', { class: 'row-actions' },
           h('button', {
             type: 'button', class: 'btn danger small',
             onclick: () => {
-              if (!confirm('¿Borrar todos los datos de la app en este navegador? Exporta antes tus etiquetas si quieres conservarlas.')) return;
-              Object.values(KEYS).forEach(k => localStorage.removeItem(k));
+              const aviso = odConnected() && !odPending()
+                ? '¿Borrar todos los datos de la app en este navegador? Tus datos siguen en OneDrive.'
+                : '¿Borrar todos los datos de la app en este navegador? Exporta antes una copia si quieres conservarlos.';
+              if (!confirm(aviso)) return;
+              Object.values(KEYS).concat(LEGACY_TAGS_KEY).forEach(k => localStorage.removeItem(k));
+              Object.keys(localStorage).filter(k => k.startsWith('msal.')).forEach(k => localStorage.removeItem(k));
               location.reload();
             }
           }, 'Borrar datos de este navegador'))));
@@ -1090,7 +1500,12 @@
     document.getElementById('showSidebar').addEventListener('click', () => toggleSidebar(true));
     document.getElementById('sidebarScrim').addEventListener('click', () => toggleSidebar(false));
     document.getElementById('drawerScrim').addEventListener('click', closeDrawer);
-    document.getElementById('syncBtn').addEventListener('click', () => doSync());
+    document.getElementById('syncBtn').addEventListener('click', () => {
+      // Si la sesión de OneDrive caducó, este clic sirve para abrir la ventana de login
+      if (odConnected() && S.odState === 'login') odConnect();
+      else syncDatos();
+      doSync();
+    });
     document.getElementById('addBtn').addEventListener('click', () => {
       const cols = columns();
       if (cols.length) openNew(cols[0].key, true);
@@ -1113,6 +1528,8 @@
   function start() {
     bind();
     renderAll();
+    // MSAL se prepara al arrancar (sin conectar con nada) para que el login responda al primer clic
+    if (S.od.clientId) loadMsal().catch(() => {});
     if (!S.token) openSetup();
     else if (!S.data) doSync({ silent: true });
   }

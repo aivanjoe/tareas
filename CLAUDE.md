@@ -31,6 +31,7 @@ Encima de las tareas de origen, la app añade su propia capa: **etiquetas con no
   - `styles.css`: todo el diseño. Variables de color en `:root`.
   - `app.js`: toda la lógica, en un IIFE. Sin módulos ES.
   - `Sortable.min.js`: SortableJS 1.15.2 (MIT), incluido en el repo a propósito para no depender de CDN. No sustituir por un enlace a CDN.
+  - `msal-browser.min.js`: MSAL.js (`@azure/msal-browser`) 4.30.0 (MIT), incluido en el repo como Sortable. Se carga bajo demanda solo si el usuario ha puesto el Client ID de OneDrive. Se eligió la rama 4 (LTS) porque su ventana emergente de login funciona sondeando la propia página, sin páginas puente.
   - `favicon.svg`: icono de la pestaña. `apple-touch-icon.png` (180 px): icono de pantalla de inicio en iPad/iPhone, generado a partir del mismo dibujo.
 - **El navegador habla directamente con las APIs** (Todoist admite CORS desde cualquier origen). No hay servidor intermedio.
 
@@ -40,10 +41,24 @@ Encima de las tareas de origen, la app añade su propia capa: **etiquetas con no
 |---|---|
 | `mp.todoist.token` | Token personal de Todoist |
 | `mp.todoist.cache` | Última copia de proyectos, secciones, tareas y comentarios |
-| `mp.tags` | `{ list: [{id, name, color}], assign: { [taskId]: [tagId, ...] } }` |
+| `mp.datos` | Almacén de datos propios de la app (ver abajo) |
+| `mp.datos.base` | Última versión sincronizada con OneDrive (base de la fusión) |
+| `mp.onedrive` | `{ clientId, account, etag, syncedAt }` |
+| `msal.*` | Caché de sesión de MSAL (la gestiona la librería) |
 | `mp.ui` | Preferencias de interfaz (`sidebarHidden`, `projectId`) |
 
-Las etiquetas viven solo en el navegador hasta la fase de OneDrive. En Ajustes hay Exportar/Importar en JSON como puente.
+`mp.tags` es el formato antiguo de las etiquetas: al arrancar, si no existe `mp.datos`, se migra solo. En Ajustes, Exportar/Importar trabaja con el almacén completo (`{ app, version: 2, datos }`) y acepta también el formato antiguo de etiquetas.
+
+## Almacén de datos y OneDrive (hecho)
+
+- **Almacén general:** `{ schema, colecciones: { [nombre]: { [id]: registro } } }`. Todo dato propio de la app (etiquetas hoy; gastos, pagos, consumos, cumpledías… después) es una colección de registros con `id`. `SCHEMA` en `app.js` es la versión del formato: si cambia, migrar al leer, y nunca escribir sobre datos de un esquema más nuevo.
+- **Etiquetas en el almacén:** `etiquetas` (`{id, name, color}`), `asignaciones` (`{id: taskId, tags: [...]}`) y el orden aparte en `orden` (`{id: 'etiquetas', ids: [...]}`). Regla general: **un registro solo cambia cuando el usuario cambia ese registro** (por eso el orden no va dentro de cada etiqueta).
+- **Fusión a tres bandas por registro** (base, local, remoto): si solo cambió un lado gana ese cambio, borrados incluidos; si cambiaron los dos, gana este dispositivo.
+- **OneDrive:** cuenta personal (autoridad `consumers`), permisos `Files.ReadWrite.AppFolder` y `User.Read`. Fichero `datos.json` en la carpeta de la app (`/me/drive/special/approot`). Lectura con los metadatos (eTag) y la `downloadUrl`; escritura con `If-Match` (o `If-None-Match: *` si no existe). Si responde 412, se vuelve a leer, se fusiona y se reintenta.
+- **Cuándo se sincroniza:** al pulsar Sincronizar (junto con Todoist) y, si está conectado, 1,5 s después de cada cambio en los datos de la app. Nunca al arrancar.
+- **Login:** ventana emergente lanzada directamente desde un clic (Conectar, Reconectar, Sincronizar con la sesión caducada, o el botón del aviso). Si el navegador la bloquea, se pasa a redirección. Si la página se abre dentro de la ventana de login (tiene `opener` y `code=`/`error=` en la dirección), la app no arranca. URI de redirección: la propia página (`https://aivanjoe.github.io/tareas/` y `http://localhost:8000/`).
+- **Estado:** en la barra lateral, bajo Todoist, aparece OneDrive con la hora o "cambios sin subir", "reconectar" o "con error". En Ajustes, sección OneDrive: Client ID, Conectar, cuenta, Sincronizar ahora y Desconectar (desconectar no borra datos).
+- **Pruebas:** sin cuenta real, se prueba en local con MSAL y Graph simulados (dos "dispositivos" contra el mismo OneDrive simulado, con conflictos de eTag).
 
 ## Integración con Todoist (hecha)
 
@@ -55,7 +70,7 @@ Las etiquetas viven solo en el navegador hasta la fase de OneDrive. En Ajustes h
 
 ## Decisiones de producto (respetarlas)
 
-- **Sincronización manual.** Solo se conecta con las fuentes cuando el usuario pulsa Sincronizar o hace un cambio (mover, crear, renombrar, completar). Al abrir la app se muestra la última copia guardada. No añadir sincronización periódica ni al arrancar.
+- **Sincronización manual.** Solo se conecta con las fuentes cuando el usuario pulsa Sincronizar o hace un cambio (mover, crear, renombrar, completar, cambiar datos de la app). Al abrir la app se muestra la última copia guardada. No añadir sincronización periódica ni al arrancar.
 - **Tres pantallas separadas: Trabajo, Personal y Calendario.** No mezclar Planner y Todoist en un mismo tablero.
 - **Vista de tablero** con las columnas de la fuente: secciones de Todoist, buckets de Planner. "Sin sección" solo aparece si tiene tareas o si no hay secciones.
 - **Las columnas son de solo lectura en la app.** Crear, renombrar, reordenar o borrar columnas se hace en el origen.
@@ -101,12 +116,13 @@ Oscuro y elegante. Tipografía Manrope (Google Fonts) con alternativas del siste
 
 ## Próximas fases
 
-1. **OneDrive personal para las etiquetas** (sincronizar entre dispositivos).
-   - Login con MSAL.js (`@azure/msal-browser`, versión fija, incluida en el repo como Sortable) contra la autoridad `https://login.microsoftonline.com/consumers` para que solo acepte cuentas personales.
-   - Permisos delegados: `Files.ReadWrite.AppFolder`, `User.Read`, `offline_access`.
-   - Fichero de datos en la carpeta de la app (`/me/drive/special/approot`), leído y escrito por Graph con control de versiones mediante eTag (`If-Match`) y fusión si hay conflicto.
-   - Migrar automáticamente las etiquetas locales existentes en el primer login.
-   - La App Registration (tipo SPA, cuentas de cualquier organización y personales) la crea el usuario; su Client ID se introduce en Ajustes.
+La App Registration ya existe (tipo SPA, cuentas de cualquier organización y personales, registrada por el usuario en el tenant del trabajo); su Client ID se introduce en Ajustes.
+
+1. **Bloques traídos de un portal anterior del usuario** (web con servidor propio), rehechos con el estilo y la arquitectura de esta app. Cada uno es una colección del almacén y una pantalla en la barra lateral. Los datos reales se importan con un fichero generado fuera del repo; nunca se suben aquí.
+   - **Cumpledías:** personas con fecha de nacimiento; hitos cada 5.000 días de vida.
+   - **Gastos y pagos:** gastos recurrentes (concepto, proveedor, categoría, importe, periodicidad, meses de cobro, día, fecha fija opcional, tipo de cobro, notas) e historial de pagos. Próximo vencimiento calculado con los meses de cobro y el último pago (tolerancia 15 días antes y 20 después). Resúmenes: próximos 30 días, hasta fin de mes y vencidos.
+   - **Consumos:** luz, gas y agua por mes (kWh o m³, costes, precio, periodo). Importar facturas PDF leyéndolas en el navegador (pdf.js incluido en el repo) y guardar el PDF en la carpeta de la app de OneDrive. Gráfica de este año frente al anterior (Chart.js incluido en el repo). Previsión del mes estimada con el historial (no hay contador en tiempo real fuera de casa).
+   - **Inversiones:** precios y gráficas de mercado. BTC y ETH con datos públicos de Binance; SPY necesita un proveedor que admita llamadas desde el navegador, con clave gratuita introducida en Ajustes.
 2. **Trabajo: Microsoft Planner.** Misma App Registration. Login contra el tenant del trabajo (el Tenant ID lo introduce el usuario en Ajustes). Permiso delegado `Tasks.ReadWrite`. Mismo tablero y mismas etiquetas que Personal, con los buckets como columnas. El login solo se pide al sincronizar.
 3. **Calendario: Google Calendar.** Pantalla propia con vista de calendario (por definir). Login con Google Identity Services desde el navegador; el Client ID de Google se introduce en Ajustes.
 4. Más adelante: elementos propios de la app (pagos recurrentes, cumpleaños, recordatorios) y captura rápida de tareas.
