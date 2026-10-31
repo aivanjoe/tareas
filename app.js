@@ -6,6 +6,13 @@
 (() => {
   'use strict';
 
+  // iPhone/iPad: Safari amplía la página al tocar un campo con letra de menos de 16 px y no la
+  // devuelve a su tamaño. Con maximum-scale=1 no lo hace; pellizcar para ampliar sigue funcionando en iOS.
+  if (/iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)) {
+    const vp = document.querySelector('meta[name="viewport"]');
+    if (vp && !/maximum-scale/.test(vp.content)) vp.content += ', maximum-scale=1';
+  }
+
   const API_URL = 'https://api.todoist.com/api/v1/sync';
   const KEYS = {
     token: 'mp.todoist.token',
