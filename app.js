@@ -39,6 +39,23 @@
   document.addEventListener('focusout', () => setTimeout(alInicio, 150));
   if (window.visualViewport) window.visualViewport.addEventListener('resize', () => setTimeout(alInicio, 60));
 
+  // Si la política de seguridad (CSP de index.html) bloquea algo, se avisa y queda en la Auditoría
+  // con el dominio, para añadirlo a la lista si es legítimo
+  const cspVistos = new Set();
+  document.addEventListener('securitypolicyviolation', e => {
+    let quien = String(e.blockedURI || '');
+    try { quien = /^https?:/.test(quien) ? new URL(quien).host : quien; } catch (err) { /* tal cual */ }
+    const clave = e.effectiveDirective + ' ' + quien;
+    if (cspVistos.has(clave)) return;
+    cspVistos.add(clave);
+    setTimeout(() => {
+      try {
+        toast('La política de seguridad ha bloqueado «' + (quien || 'algo') + '». Si algo no funciona, díselo a quien mantiene Visir.', 'error', null, 12000);
+        audit('visir', 'error', 'Bloqueado por la política de seguridad: ' + (quien || '(sin dirección)'), { detalle: ['Regla: ' + e.effectiveDirective] });
+      } catch (err) { /* la app aún no ha arrancado */ }
+    }, 0);
+  });
+
   const API_URL = 'https://api.todoist.com/api/v1/sync';
   const KEYS = {
     token: 'mp.todoist.token',

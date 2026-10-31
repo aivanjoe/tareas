@@ -192,6 +192,7 @@ Oscuro y elegante. Tipografía Manrope (Google Fonts) con alternativas del siste
 
 - Crear el DOM con el helper `h()` de `app.js`. **Nunca usar `innerHTML` con datos de las APIs ni del usuario.**
 - Validar colores con `isHex()` antes de usarlos en estilos.
+- **Política de seguridad (CSP)** en una `<meta http-equiv="Content-Security-Policy">` de `index.html`: código solo propio (`script-src 'self'`, sin `eval` ni scripts en línea), estilos propios y en línea (los atributos `style` con `--c`) más Google Fonts, y conexiones (`connect-src`) solo con Todoist, Graph, el login de Microsoft, las descargas de OneDrive (`*.1drv.com`, `*.onedrive.com`, `*.microsoftpersonalcontent.com`, `*.sharepoint.com`, `*.livefilestore.com`) y las APIs de Google; `frame-src` solo el login de Microsoft; `worker-src 'self' blob:` (pdf.js). **Al usar un servicio o dominio nuevo, añadirlo a la CSP** o quedará bloqueado. Si algo se bloquea, la app avisa y lo apunta en la Auditoría («Bloqueado por la política de seguridad: dominio»). Las navegaciones a Google y Microsoft para iniciar sesión no las limita la CSP.
 - Cambios optimistas en pantalla y después la llamada a la API; si falla, avisar con `toast()` y re-sincronizar.
 - Mantener los textos de la interfaz en español y con tono directo.
 - Código legible y comentado en español solo donde aporte.
