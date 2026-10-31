@@ -186,7 +186,7 @@ Oscuro y elegante. Tipografía Manrope (Google Fonts) con alternativas del siste
 - Acento principal lima `#DBF266` (botón primario, marca), azul `#7FA2E0` (selección, foco), rojo suave `#F0857A` (errores, borrar).
 - Esquinas redondeadas (9–18 px), bordes de 1 px semitransparentes, sin degradados ni sombras exageradas.
 - Iconos de línea en SVG, sin emojis. Toda la interfaz en español.
-- **Marca:** un vegvísir dibujado en línea, en oscuro `#0B0F15` sobre cuadrado lima redondeado. El dibujo detallado está en la barra lateral (SVG en línea en `index.html`) y en `apple-touch-icon.png`. En la barra lateral, el cuadrado y el nombre «VISIR» van dentro de un **marco lima fino** (1,5 px, esquinas de 26 px; `.brand`), elegido por el usuario entre varias opciones (también se probaron el nombre dentro del cuadrado, runas y letra uncial). `favicon.svg` usa una versión simplificada (círculo, anillo central y ocho brazos con un remate corto), que se lee mejor a 16 px; la eligió el usuario.
+- **Marca:** un vegvísir dibujado en línea, en oscuro `#0B0F15` sobre cuadrado lima redondeado. El dibujo detallado está en la barra lateral (SVG en línea en `index.html`) y en `apple-touch-icon.png`. En la barra lateral, el cuadrado y el nombre «VISIR» van dentro de un **marco lima fino** (1,5 px, esquinas de 26 px; `.brand`), elegido por el usuario entre varias opciones (también se probaron el nombre dentro del cuadrado, runas y letra uncial). `favicon.svg` es **el mismo dibujo del logo con el trazo más grueso** (4,6 sobre 100 en vez de 2,6, al 90 %) sobre el cuadrado lima, para que se reconozca y aguante a 16 px; lo eligió el usuario entre varias opciones (sustituye a una versión simplificada que se parecía poco al logo).
 
 ## Convenciones de código
 
