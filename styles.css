@@ -373,3 +373,35 @@ body.tag-dragging, body.tag-dragging * { cursor: grabbing !important; }
   .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .stat-value { font-size: 24px; }
 }
+
+/* ===== Gastos ===== */
+.stats.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.stat.danger .stat-value { color: var(--danger); }
+.g-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.panel > .chips { margin-bottom: 2px; }
+.chips-sep { width: 1px; align-self: stretch; margin: 2px 4px; background: var(--line2); }
+.panel-total { font-size: 14px; font-weight: 800; color: var(--accent); }
+.ev.gasto { grid-template-columns: 10px minmax(0, 1fr) auto auto; }
+.ev.pago { grid-template-columns: 10px minmax(0, 1fr) auto auto; }
+.ev.late { border-color: rgba(240, 133, 122, 0.4); }
+.ev.paused { opacity: 0.55; }
+.cat-dot { width: 10px; height: 10px; border-radius: 999px; background: var(--c); }
+.as-btn { padding: 0; border: none; background: transparent; text-align: left; cursor: pointer; }
+.as-btn:hover .ev-name { color: var(--blue); }
+.ev-amount { font-size: 14px; font-weight: 800; color: var(--text); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.ev-until.late { background: rgba(240, 133, 122, 0.16); color: var(--danger); }
+.list-sep { margin: 10px 2px 2px; font-size: 11px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; color: var(--faint); }
+.form { display: flex; flex-direction: column; gap: 14px; }
+.form-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; align-items: start; }
+.months { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 6px; }
+.month { height: 32px; border-radius: 8px; border: 1px solid var(--line2); background: transparent; color: var(--muted); font-size: 12.5px; font-weight: 700; }
+.month.on { background: rgba(219, 242, 102, 0.14); border-color: rgba(219, 242, 102, 0.5); color: var(--accent); }
+.check-line { display: flex; align-items: center; gap: 10px; font-size: 13.5px; color: var(--text2); cursor: pointer; }
+.check-line input { width: 16px; height: 16px; accent-color: var(--accent); }
+@media (max-width: 700px) {
+  .stats.three { grid-template-columns: minmax(0, 1fr); }
+  .ev.gasto { grid-template-columns: 10px minmax(0, 1fr) auto; }
+  .ev.gasto > .btn { grid-column: 2 / -1; justify-self: start; }
+  .form-row { grid-template-columns: minmax(0, 1fr); }
+  .months { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+}

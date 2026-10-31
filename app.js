@@ -1420,11 +1420,16 @@
       try {
         const parsed = JSON.parse(await file.text());
         if (parsed && parsed.datos) {
-          // Copia completa del almacén
+          // Copia del almacén: se sustituyen solo las colecciones que trae el fichero
           const doc = normalizeDoc(parsed.datos);
           if (doc.schema > SCHEMA) throw new Error('versión');
-          if (!confirm('Se sustituirán todos los datos de la app por los del fichero. ¿Continuar?')) return;
-          applyDatos(doc);
+          const names = Object.keys(doc.colecciones);
+          if (!names.length) throw new Error('vacío');
+          const resumen = names.map(n => n + ' (' + Object.keys(doc.colecciones[n]).length + ')').join(', ');
+          if (!confirm('Se sustituirán estos datos por los del fichero: ' + resumen + '. El resto no se toca. ¿Continuar?')) return;
+          const merged = normalizeDoc(S.datos);
+          for (const n of names) merged.colecciones[n] = doc.colecciones[n];
+          applyDatos(merged);
           saveDatos();
         } else {
           // Formato antiguo: solo etiquetas
@@ -1464,7 +1469,7 @@
       odSection(),
       h('div', { class: 'modal-section' },
         h('h3', null, 'Copia de seguridad'),
-        h('p', { class: 'muted' }, 'Exporta todos los datos de la app (etiquetas y lo que se añada) en un fichero, o importa una copia. Importar sustituye los datos actuales.'),
+        h('p', { class: 'muted' }, 'Exporta todos los datos de la app en un fichero, o importa una copia. Al importar se sustituye solo lo que trae el fichero (por ejemplo, gastos y pagos); lo demás no se toca.'),
         h('div', { class: 'row-actions' },
           h('button', { type: 'button', class: 'btn ghost small', onclick: exportData }, 'Exportar'),
           h('button', { type: 'button', class: 'btn ghost small', onclick: () => fileInput.click() }, 'Importar'),
@@ -1489,9 +1494,11 @@
   }
 
   // ---------- pantallas ----------
+  // Pantallas propias: sección en index.html (#view<Nombre>), función que la pinta y acción del botón principal
   const VIEWS = {
     personal: { title: 'Personal', add: 'Añadir tarea' },
-    contactos: { title: 'Contactos', eyebrow: 'Cumpledías y cumpleaños', add: 'Añadir persona' }
+    contactos: { title: 'Contactos', eyebrow: 'Cumpledías y cumpleaños', add: 'Añadir persona', el: 'viewContactos', render: () => renderCumpledias(), onAdd: () => openPerson(null) },
+    gastos: { title: 'Gastos', eyebrow: 'Pagos recurrentes', add: 'Nuevo gasto', el: 'viewGastos', render: () => renderGastos(), onAdd: () => openGasto(null) }
   };
 
   function applyView() {
@@ -1511,8 +1518,8 @@
     document.getElementById('addLabel').textContent = cfg.add;
     document.getElementById('tagbar').hidden = !board;
     document.getElementById('boardWrap').hidden = !board;
-    document.getElementById('viewContactos').hidden = v !== 'contactos';
-    if (v === 'contactos') renderCumpledias();
+    for (const [k, c] of Object.entries(VIEWS)) if (c.el) document.getElementById(c.el).hidden = k !== v;
+    if (cfg.render) cfg.render();
   }
 
   function showView(v) {
@@ -1659,6 +1666,333 @@
     setTimeout(() => name.focus(), 50);
   }
 
+  // ---------- gastos y pagos ----------
+  // Colecciones: "gastos" (recurrentes) y "pagos" (historial). Cada pago guarda copia del concepto y
+  // la categoría para que el historial se conserve aunque se borre el gasto.
+  const CATEGORIAS = ['Seguros', 'Impuestos', 'Comunidad', 'Inversiones', 'Suscripciones', 'Consumos', 'Préstamos', 'Alquileres', 'Streaming', 'Otros'];
+  const CAT_COLOR = { Seguros: '#7FA2E0', Impuestos: '#F0857A', Comunidad: '#F2B35B', Inversiones: '#8BD17C', Suscripciones: '#B39DF0',
+    Consumos: '#F5D76E', 'Préstamos': '#E68AC4', Alquileres: '#D9A77A', Streaming: '#6FC3E8', Otros: '#9AA4B5' };
+  const PERIODOS = { mensual: 1, bimestral: 2, trimestral: 3, semestral: 6, anual: 12 };
+  const PERIODO_NOMBRE = { mensual: 'Mensual', bimestral: 'Bimestral', trimestral: 'Trimestral', semestral: 'Semestral', anual: 'Anual', personalizado: 'Meses elegidos' };
+  const MESES_CORTOS = ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'];
+  const TOL_ANTES = 15, GRACIA = 20; // días: un pago cubre un vencimiento si cae entre 15 días antes y 20 después
+  let gTab = 'proximos';   // proximos | historial
+  let gCat = 'Todas';
+  let hYear = 'Todos';
+
+  const gastos = () => Object.values(S.datos.colecciones.gastos || {});
+  const pagos = () => Object.values(S.datos.colecciones.pagos || {});
+  const fmtEur = n => (Number(n) || 0).toLocaleString('es-ES', { style: 'currency', currency: 'EUR' });
+  const catColor = c => CAT_COLOR[c] || CAT_COLOR.Otros;
+  // Importes escritos a mano: admite coma o punto decimal ("25,40", "25.4", "1.250,00")
+  const fmtNumInput = n => (Math.round((Number(n) || 0) * 100) / 100).toFixed(2).replace('.', ',');
+  function parseAmount(v) {
+    let t = String(v || '').trim().replace(/\s|€/g, '');
+    if (t.includes(',')) t = t.replace(/\./g, '').replace(',', '.');
+    return /^\d+(\.\d+)?$/.test(t) ? parseFloat(t) : NaN;
+  }
+  const todayYmd = () => { const n = new Date(); return n.getFullYear() + '-' + String(n.getMonth() + 1).padStart(2, '0') + '-' + String(n.getDate()).padStart(2, '0'); };
+  const mesesPara = (periodo, desde) => {
+    const step = PERIODOS[periodo] || 1;
+    if (step === 1) return [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+    const out = [];
+    for (let m = ((desde - 1) % step) + 1; m <= 12; m += step) out.push(m);
+    return out;
+  };
+
+  // Vencimientos (días UTC) entre dos años; el día se ajusta al último del mes si no existe (30 en febrero → 28/29)
+  function vencimientos(g, y1, y2) {
+    const meses = Array.isArray(g.meses) && g.meses.length ? g.meses.slice().sort((a, b) => a - b) : mesesPara(g.periodicidad, 1);
+    const out = [];
+    for (let y = y1; y <= y2; y++) {
+      for (const m of meses) {
+        const last = new Date(Date.UTC(y, m, 0)).getUTCDate();
+        out.push(Date.UTC(y, m - 1, Math.min(g.dia || 1, last)));
+      }
+    }
+    return out;
+  }
+
+  const lastPago = id => pagos().filter(p => p.gastoId === id && isYmd(p.fecha)).map(p => utcDay(p.fecha)).sort((a, b) => b - a)[0] || null;
+
+  // Próximo vencimiento: el último pago cubre su vencimiento y toca el siguiente; sin pago, el primero desde hoy.
+  // La fecha fija (proximoPago) manda mientras no haya un pago que la cubra.
+  function nextDue(g, today) {
+    const last = lastPago(g.id);
+    if (isYmd(g.proximoPago) && !(last && last >= utcDay(g.proximoPago) - TOL_ANTES * DAY)) return utcDay(g.proximoPago);
+    const y = new Date(today).getUTCFullYear();
+    const v = vencimientos(g, y - 1, y + 1);
+    if (!v.length) return null;
+    if (last) {
+      let cubierto = null;
+      for (const d of v) if (last >= d - TOL_ANTES * DAY && last <= d + GRACIA * DAY) cubierto = d;
+      if (cubierto !== null) {
+        const sig = v.find(d => d > cubierto);
+        if (sig !== undefined) return sig;
+      }
+    }
+    const fut = v.find(d => d >= today);
+    return fut !== undefined ? fut : v[v.length - 1];
+  }
+
+  // Fecha corta: sin el año si es el actual
+  const shortDay = t => new Date(t).getUTCFullYear() === new Date(todayUtc()).getUTCFullYear() ? fmtDay(t).replace(/ \d{4}$/, '') : fmtDay(t);
+
+  function dueText(n) {
+    if (n < 0) return n === -1 ? 'venció ayer' : 'vencido hace ' + (-n) + ' días';
+    if (n === 0) return 'hoy';
+    if (n === 1) return 'mañana';
+    return 'en ' + n + ' días';
+  }
+
+  function renderGastos() {
+    const root = document.getElementById('viewGastos');
+    const today = todayUtc();
+    root.dataset.day = String(today);
+    const activos = gastos().filter(g => g.activo !== false).map(g => {
+      const due = nextDue(g, today);
+      return { g, due, until: due === null ? null : Math.round((due - today) / DAY) };
+    });
+    const t = new Date(today);
+    const finMes = Date.UTC(t.getUTCFullYear(), t.getUTCMonth() + 1, 0);
+    const prox30 = activos.filter(x => x.until !== null && x.until >= 0 && x.until <= 30);
+    const hastaFin = activos.filter(x => x.until !== null && x.until >= 0 && x.due <= finMes);
+    const vencidos = activos.filter(x => x.until !== null && x.until < 0);
+    const sum = arr => arr.reduce((a, x) => a + (Number(x.g.importe) || 0), 0);
+    const stat = (label, value, sub, cls) => h('div', { class: 'stat' + (cls ? ' ' + cls : '') },
+      h('span', { class: 'stat-label' }, label), h('span', { class: 'stat-value' }, value), h('span', { class: 'stat-sub' }, sub));
+
+    const tabs = h('div', { class: 'seg', role: 'group', 'aria-label': 'Vista' },
+      [['proximos', 'Próximos'], ['historial', 'Historial']].map(([k, label]) =>
+        h('button', { type: 'button', class: gTab === k ? 'on' : '', 'aria-pressed': gTab === k ? 'true' : 'false', onclick: () => { gTab = k; renderGastos(); } }, label)));
+
+    const head = h('div', { class: 'g-toolbar' }, tabs,
+      h('button', { type: 'button', class: 'btn ghost small', onclick: () => openPago(null) }, ICON.plus(), 'Registrar pago'));
+
+    if (gTab === 'historial') {
+      root.replaceChildren(head, historialPanel());
+      return;
+    }
+
+    const cats = ['Todas'].concat(CATEGORIAS.filter(c => gastos().some(g => g.categoria === c)));
+    if (!cats.includes(gCat)) gCat = 'Todas';
+    const chips = h('div', { class: 'chips' }, cats.map(c => h('button', {
+      type: 'button', class: 'chip' + (gCat === c ? ' on' : ''), style: '--c:' + (c === 'Todas' ? '#C9D0DC' : catColor(c)),
+      'aria-pressed': gCat === c ? 'true' : 'false', onclick: () => { gCat = c; renderGastos(); }
+    }, c === 'Todas' ? null : h('span', { class: 'dot' }), c)));
+
+    const inCat = x => gCat === 'Todas' || x.g.categoria === gCat;
+    const list = h('div', { class: 'ev-list' });
+    const rows = activos.filter(inCat).sort((a, b) => (a.due ?? Infinity) - (b.due ?? Infinity) || a.g.concepto.localeCompare(b.g.concepto, 'es'));
+    for (const x of rows) list.append(gastoRow(x.g, x.due, x.until));
+    const pausados = gastos().filter(g => g.activo === false).filter(g => inCat({ g }));
+    if (pausados.length) {
+      list.append(h('p', { class: 'list-sep' }, 'Pausados'));
+      for (const g of pausados.sort((a, b) => a.concepto.localeCompare(b.concepto, 'es'))) list.append(gastoRow(g, null, null, true));
+    }
+    if (!rows.length && !pausados.length) list.append(h('p', { class: 'muted empty-note' }, gastos().length ? 'No hay gastos en esta categoría.' : 'Crea tu primer gasto recurrente con «Nuevo gasto».'));
+
+    root.replaceChildren(
+      h('div', { class: 'stats three' },
+        stat('Próximos 30 días', fmtEur(sum(prox30)), prox30.length + (prox30.length === 1 ? ' gasto' : ' gastos'), 'accent'),
+        stat('Hasta fin de mes', fmtEur(sum(hastaFin)), hastaFin.length + (hastaFin.length === 1 ? ' gasto' : ' gastos')),
+        stat('Vencidos', String(vencidos.length), vencidos.length ? fmtEur(sum(vencidos)) + ' sin registrar' : 'todo al día', vencidos.length ? 'danger' : '')),
+      head,
+      h('section', { class: 'panel' }, chips, list));
+  }
+
+  function gastoRow(g, due, until, paused) {
+    const sub = [g.categoria || 'Otros', PERIODO_NOMBRE[g.periodicidad] || 'Mensual', 'día ' + (g.dia || 1)];
+    if (g.proveedor) sub.push(g.proveedor);
+    if (g.cobro === 'automatico') sub.push('domiciliado');
+    const chipCls = until === null ? '' : until < 0 ? ' late' : until === 0 ? ' now' : until <= 7 ? ' soon' : '';
+    return h('div', { class: 'ev gasto' + (paused ? ' paused' : '') + (until !== null && until < 0 ? ' late' : '') },
+      h('span', { class: 'cat-dot', style: '--c:' + catColor(g.categoria), title: g.categoria || 'Otros' }),
+      h('button', { type: 'button', class: 'ev-main as-btn', onclick: () => openGasto(g.id), title: 'Editar' },
+        h('span', { class: 'ev-name' }, g.concepto),
+        h('span', { class: 'ev-what' }, sub.join(' · '))),
+      h('div', { class: 'ev-when' },
+        h('span', { class: 'ev-amount' }, fmtEur(g.importe)),
+        paused ? h('span', { class: 'ev-until' }, 'pausado')
+          : h('span', { class: 'ev-until' + chipCls, title: due ? fmtDay(due) : '' }, due ? dueText(until) + ' · ' + shortDay(due) : 'sin fecha')),
+      paused ? h('span') : h('button', { type: 'button', class: 'btn ghost small', onclick: () => openPago(g.id) }, 'Pagar'));
+  }
+
+  function historialPanel() {
+    const all = pagos().filter(p => isYmd(p.fecha)).sort((a, b) => b.fecha.localeCompare(a.fecha) || a.concepto.localeCompare(b.concepto, 'es'));
+    const years = ['Todos'].concat([...new Set(all.map(p => p.fecha.slice(0, 4)))].sort().reverse());
+    if (!years.includes(hYear)) hYear = 'Todos';
+    const cats = ['Todas'].concat(CATEGORIAS.filter(c => all.some(p => p.categoria === c)));
+    if (!cats.includes(gCat)) gCat = 'Todas';
+    const shown = all.filter(p => (hYear === 'Todos' || p.fecha.startsWith(hYear)) && (gCat === 'Todas' || p.categoria === gCat));
+    const total = shown.reduce((a, p) => a + (Number(p.importe) || 0), 0);
+
+    const chips = h('div', { class: 'chips' },
+      cats.map(c => h('button', {
+        type: 'button', class: 'chip' + (gCat === c ? ' on' : ''), style: '--c:' + (c === 'Todas' ? '#C9D0DC' : catColor(c)),
+        'aria-pressed': gCat === c ? 'true' : 'false', onclick: () => { gCat = c; renderGastos(); }
+      }, c === 'Todas' ? null : h('span', { class: 'dot' }), c)),
+      h('span', { class: 'chips-sep' }),
+      years.map(y => h('button', {
+        type: 'button', class: 'chip' + (hYear === y ? ' on' : ''), style: '--c:#C9D0DC', 'aria-pressed': hYear === y ? 'true' : 'false',
+        onclick: () => { hYear = y; renderGastos(); }
+      }, y)));
+
+    const list = h('div', { class: 'ev-list' });
+    for (const p of shown) {
+      list.append(h('div', { class: 'ev pago' },
+        h('span', { class: 'cat-dot', style: '--c:' + catColor(p.categoria), title: p.categoria || 'Otros' }),
+        h('div', { class: 'ev-main' },
+          h('span', { class: 'ev-name' }, p.concepto),
+          h('span', { class: 'ev-what' }, [fmtDay(utcDay(p.fecha)), p.categoria || 'Otros'].concat(p.notas ? [p.notas] : []).join(' · '))),
+        h('span', { class: 'ev-amount' }, fmtEur(p.importe)),
+        h('button', {
+          type: 'button', class: 'icon-btn mini', 'aria-label': 'Borrar pago',
+          onclick: () => {
+            if (!confirm('¿Borrar el pago de «' + p.concepto + '» del ' + fmtDay(utcDay(p.fecha)) + '?')) return;
+            const rest = Object.assign({}, S.datos.colecciones.pagos);
+            delete rest[p.id];
+            S.datos.colecciones.pagos = rest;
+            saveDatos();
+            renderGastos();
+          }
+        }, ICON.trash())));
+    }
+    if (!shown.length) list.append(h('p', { class: 'muted empty-note' }, all.length ? 'No hay pagos con estos filtros.' : 'Aún no hay pagos registrados.'));
+
+    return h('section', { class: 'panel' }, chips,
+      h('div', { class: 'panel-head' }, h('h2', null, shown.length + (shown.length === 1 ? ' pago' : ' pagos')), h('span', { class: 'panel-total' }, fmtEur(total))),
+      list);
+  }
+
+  function putRecord(col, rec) {
+    S.datos.colecciones[col] = Object.assign({}, S.datos.colecciones[col], { [rec.id]: rec });
+    saveDatos();
+  }
+
+  function openGasto(id) {
+    const cur = id ? (S.datos.colecciones.gastos || {})[id] : null;
+    const st = {
+      periodicidad: cur && (PERIODOS[cur.periodicidad] || cur.periodicidad === 'personalizado') ? cur.periodicidad : 'mensual',
+      meses: cur && Array.isArray(cur.meses) && cur.meses.length ? cur.meses.slice() : mesesPara('mensual', 1),
+      cobro: cur ? (cur.cobro === 'manual' ? 'manual' : 'automatico') : 'automatico'
+    };
+    const inp = (idAttr, attrs) => h('input', Object.assign({ class: 'input', id: idAttr, autocomplete: 'off' }, attrs));
+    const concepto = inp('gConcepto', { type: 'text', maxlength: '80', value: cur ? cur.concepto : '', placeholder: 'Por ejemplo: Seguro del coche' });
+    const proveedor = inp('gProveedor', { type: 'text', maxlength: '80', value: cur ? cur.proveedor || '' : '', placeholder: 'Opcional' });
+    const importe = inp('gImporte', { type: 'text', inputmode: 'decimal', value: cur ? fmtNumInput(cur.importe) : '', placeholder: '0,00' });
+    const dia = inp('gDia', { type: 'number', min: '1', max: '31', step: '1', inputmode: 'numeric', value: String(cur ? cur.dia || 1 : new Date().getDate()) });
+    const categoria = h('select', { class: 'select', id: 'gCategoria' }, CATEGORIAS.map(c => h('option', { value: c, selected: (cur ? cur.categoria : 'Otros') === c }, c)));
+    const periodo = h('select', { class: 'select', id: 'gPeriodo' }, Object.entries(PERIODO_NOMBRE).map(([k, v]) => h('option', { value: k, selected: st.periodicidad === k }, v)));
+    const proximo = inp('gProximo', { type: 'date', value: cur && isYmd(cur.proximoPago) ? cur.proximoPago : '' });
+    const notas = h('textarea', { class: 'input textarea', id: 'gNotas', rows: '2', maxlength: '500' });
+    notas.value = cur ? cur.notas || '' : '';
+    const pausado = h('input', { type: 'checkbox', id: 'gPausado', checked: cur ? cur.activo === false : false });
+
+    const mesesBox = h('div', { class: 'months' });
+    const drawMeses = () => mesesBox.replaceChildren(...MESES_CORTOS.map((n, i) => {
+      const m = i + 1, on = st.meses.includes(m);
+      return h('button', {
+        type: 'button', class: 'month' + (on ? ' on' : ''), 'aria-pressed': on ? 'true' : 'false',
+        onclick: () => { st.meses = on ? st.meses.filter(x => x !== m) : st.meses.concat(m).sort((a, b) => a - b); drawMeses(); }
+      }, n);
+    }));
+    periodo.addEventListener('change', () => {
+      st.periodicidad = periodo.value;
+      if (st.periodicidad !== 'personalizado') st.meses = mesesPara(st.periodicidad, st.meses[0] || new Date().getMonth() + 1);
+      drawMeses();
+    });
+    drawMeses();
+    const cobroSeg = h('div', { class: 'seg' });
+    const drawCobro = () => cobroSeg.replaceChildren(...[['automatico', 'Domiciliado'], ['manual', 'Pago manual']].map(([k, v]) =>
+      h('button', { type: 'button', class: st.cobro === k ? 'on' : '', 'aria-pressed': st.cobro === k ? 'true' : 'false', onclick: () => { st.cobro = k; drawCobro(); } }, v)));
+    drawCobro();
+
+    let close = null;
+    const save = () => {
+      const c = concepto.value.trim();
+      const imp = parseAmount(importe.value);
+      const d = parseInt(dia.value, 10);
+      if (!c) { toast('Escribe el concepto.', 'error'); concepto.focus(); return; }
+      if (!(imp >= 0)) { toast('Pon un importe válido.', 'error'); importe.focus(); return; }
+      if (!(d >= 1 && d <= 31)) { toast('El día debe estar entre 1 y 31.', 'error'); dia.focus(); return; }
+      if (!st.meses.length) { toast('Marca al menos un mes de cobro.', 'error'); return; }
+      const rec = Object.assign({}, cur, {
+        id: cur ? cur.id : 'g-' + uid(), concepto: c, proveedor: proveedor.value.trim(), categoria: categoria.value,
+        importe: Math.round(imp * 100) / 100, periodicidad: st.periodicidad, meses: st.meses.slice(), dia: d,
+        proximoPago: isYmd(proximo.value) ? proximo.value : null, cobro: st.cobro, notas: notas.value.trim(),
+        activo: !pausado.checked
+      });
+      if (!cur) rec.creado = Date.now();
+      putRecord('gastos', rec);
+      close();
+      renderGastos();
+    };
+    const field = (label, forId, el, hint) => h('div', { class: 'field' }, h('label', { class: 'field-label', for: forId }, label), el, hint ? h('p', { class: 'hint' }, hint) : null);
+    const body = h('div', { class: 'form' },
+      field('Concepto', 'gConcepto', concepto),
+      h('div', { class: 'form-row' }, field('Importe (€)', 'gImporte', importe), field('Categoría', 'gCategoria', categoria)),
+      h('div', { class: 'form-row' }, field('Periodicidad', 'gPeriodo', periodo), field('Día de cobro', 'gDia', dia)),
+      h('div', { class: 'field' }, h('span', { class: 'field-label' }, 'Meses de cobro'), mesesBox,
+        h('p', { class: 'hint' }, 'Se marcan según la periodicidad; pulsa un mes para cambiarlo.')),
+      field('Próximo pago fijo', 'gProximo', proximo, 'Opcional. Úsalo si te han cambiado la fecha de cobro; deja de aplicarse al registrar el pago.'),
+      h('div', { class: 'form-row' }, field('Proveedor', 'gProveedor', proveedor), h('div', { class: 'field' }, h('span', { class: 'field-label' }, 'Cobro'), cobroSeg)),
+      field('Notas', 'gNotas', notas),
+      h('label', { class: 'check-line', for: 'gPausado' }, pausado, 'Pausado (no cuenta en vencimientos ni totales)'),
+      h('div', { class: 'row-actions modal-foot' },
+        cur ? h('button', {
+          type: 'button', class: 'btn danger small',
+          onclick: () => {
+            if (!confirm('¿Borrar «' + cur.concepto + '»? Los pagos ya registrados se quedan en el historial.')) return;
+            const rest = Object.assign({}, S.datos.colecciones.gastos);
+            delete rest[cur.id];
+            S.datos.colecciones.gastos = rest;
+            saveDatos();
+            close();
+            renderGastos();
+          }
+        }, 'Borrar') : null,
+        h('span', { class: 'spacer' }),
+        h('button', { type: 'button', class: 'btn subtle small', onclick: () => close() }, 'Cancelar'),
+        h('button', { type: 'button', class: 'btn primary small', onclick: save }, cur ? 'Guardar' : 'Crear gasto')));
+    close = openModal(cur ? 'Editar gasto' : 'Nuevo gasto', body);
+    if (!cur) setTimeout(() => concepto.focus(), 50);
+  }
+
+  function openPago(gastoId) {
+    const lista = gastos().sort((a, b) => a.concepto.localeCompare(b.concepto, 'es'));
+    if (!lista.length) { toast('Primero crea un gasto.', 'error'); return; }
+    const sel = h('select', { class: 'select', id: 'pgGasto' }, lista.map(g => h('option', { value: g.id, selected: g.id === gastoId }, g.concepto + (g.activo === false ? ' (pausado)' : ''))));
+    const g0 = () => (S.datos.colecciones.gastos || {})[sel.value];
+    const importe = h('input', { class: 'input', id: 'pgImporte', type: 'text', inputmode: 'decimal', autocomplete: 'off', value: fmtNumInput(g0().importe) });
+    const fecha = h('input', { class: 'input', id: 'pgFecha', type: 'date', value: todayYmd() });
+    const notas = h('input', { class: 'input', id: 'pgNotas', type: 'text', maxlength: '200', placeholder: 'Opcional', autocomplete: 'off' });
+    sel.addEventListener('change', () => { importe.value = fmtNumInput(g0().importe); });
+    let close = null;
+    const save = () => {
+      const g = g0();
+      const imp = parseAmount(importe.value);
+      if (!g) return;
+      if (!(imp >= 0)) { toast('Pon un importe válido.', 'error'); importe.focus(); return; }
+      if (!isYmd(fecha.value)) { toast('Pon una fecha válida.', 'error'); fecha.focus(); return; }
+      putRecord('pagos', { id: 'pg-' + uid(), gastoId: g.id, concepto: g.concepto, categoria: g.categoria || 'Otros', fecha: fecha.value, importe: Math.round(imp * 100) / 100, notas: notas.value.trim() });
+      close();
+      renderGastos();
+      toast('Pago registrado: ' + g.concepto);
+    };
+    notas.addEventListener('keydown', e => { if (e.key === 'Enter') save(); });
+    const field = (label, forId, el) => h('div', { class: 'field' }, h('label', { class: 'field-label', for: forId }, label), el);
+    const body = h('div', { class: 'form' },
+      field('Gasto', 'pgGasto', sel),
+      h('div', { class: 'form-row' }, field('Fecha', 'pgFecha', fecha), field('Importe (€)', 'pgImporte', importe)),
+      field('Notas', 'pgNotas', notas),
+      h('div', { class: 'row-actions modal-foot' },
+        h('span', { class: 'spacer' }),
+        h('button', { type: 'button', class: 'btn subtle small', onclick: () => close() }, 'Cancelar'),
+        h('button', { type: 'button', class: 'btn primary small', onclick: save }, 'Registrar pago')));
+    close = openModal('Registrar pago', body);
+  }
+
   // ---------- menú lateral ----------
   function toggleSidebar(show) {
     const app = document.getElementById('app');
@@ -1685,7 +2019,8 @@
       doSync();
     });
     document.getElementById('addBtn').addEventListener('click', () => {
-      if (S.ui.view === 'contactos') return openPerson(null);
+      const cfg = VIEWS[S.ui.view];
+      if (cfg && cfg.onAdd) return cfg.onAdd();
       const cols = columns();
       if (cols.length) openNew(cols[0].key, true);
     });
@@ -1708,8 +2043,9 @@
     setInterval(() => {
       renderSyncState();
       // Al cambiar de día se recalculan los cumpledías
-      const cd = document.getElementById('viewContactos');
-      if (!cd.hidden && cd.dataset.day !== String(todayUtc())) renderCumpledias();
+      const cfg = VIEWS[S.ui.view];
+      const el = cfg && cfg.el && document.getElementById(cfg.el);
+      if (el && !el.hidden && el.dataset.day !== String(todayUtc())) cfg.render();
     }, 60000);
   }
 

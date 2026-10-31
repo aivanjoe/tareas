@@ -47,7 +47,7 @@ Encima de las tareas de origen, la app añade su propia capa: **etiquetas con no
 | `msal.*` | Caché de sesión de MSAL (la gestiona la librería) |
 | `mp.ui` | Preferencias de interfaz (`sidebarHidden`, `projectId`) |
 
-`mp.tags` es el formato antiguo de las etiquetas: al arrancar, si no existe `mp.datos`, se migra solo. En Ajustes, Exportar/Importar trabaja con el almacén completo (`{ app, version: 2, datos }`) y acepta también el formato antiguo de etiquetas.
+`mp.tags` es el formato antiguo de las etiquetas: al arrancar, si no existe `mp.datos`, se migra solo. En Ajustes, Exportar descarga el almacén completo (`{ app, version: 2, datos }`); Importar sustituye solo las colecciones que trae el fichero (así se importan datos de otras fuentes sin tocar el resto) y acepta también el formato antiguo de etiquetas.
 
 ## Almacén de datos y OneDrive (hecho)
 
@@ -71,7 +71,7 @@ Encima de las tareas de origen, la app añade su propia capa: **etiquetas con no
 ## Decisiones de producto (respetarlas)
 
 - **Sincronización manual.** Solo se conecta con las fuentes cuando el usuario pulsa Sincronizar o hace un cambio (mover, crear, renombrar, completar, cambiar datos de la app). Al abrir la app se muestra la última copia guardada. No añadir sincronización periódica ni al arrancar.
-- **Pantallas separadas: Personal, Trabajo, Calendario y las propias de la app (Contactos, …).** No mezclar Planner y Todoist en un mismo tablero. La pantalla activa se recuerda por navegador (`mp.ui.view`). La cabecera cambia con la pantalla: título, antetítulo y el botón principal ("Añadir tarea", "Añadir persona"…); Sincronizar es común.
+- **Pantallas separadas: Personal, Trabajo, Calendario y las propias de la app (Contactos, Gastos, …).** No mezclar Planner y Todoist en un mismo tablero. La pantalla activa se recuerda por navegador (`mp.ui.view`). La cabecera cambia con la pantalla: título, antetítulo y el botón principal ("Añadir tarea", "Añadir persona"…); Sincronizar es común.
 - **Contactos** (en el menú; antetítulo "Cumpledías y cumpleaños"): colección `personas` (`{id, name, birth: 'AAAA-MM-DD'}`, pensada para enlazar más adelante con contactos de Google). Muestra, desde hoy incluido, los tres próximos múltiplos de 5.000 días de vida de cada persona y su próximo cumpleaños (los nacidos el 29 de febrero lo celebran el 28 en años no bisiestos). Fechas calculadas en UTC por día para evitar saltos de horario. Arriba: próximo evento, eventos este mes y este año, y número de personas; filtro Todo / Cumpledías / Cumpleaños; lista de personas para añadir, editar o borrar. Al cambiar de día se recalcula sola.
 - **Vista de tablero** con las columnas de la fuente: secciones de Todoist, buckets de Planner. "Sin sección" solo aparece si tiene tareas o si no hay secciones.
 - **Las columnas son de solo lectura en la app.** Crear, renombrar, reordenar o borrar columnas se hace en el origen.
@@ -84,6 +84,12 @@ Encima de las tareas de origen, la app añade su propia capa: **etiquetas con no
 - **Menú lateral estrecho y ocultable** (preferencia recordada por navegador): igual de ancho que el logo (116 px), con el logo arriba, cada opción como icono con su nombre en pequeño debajo, sin contadores, la última sincronización compacta abajo y el botón de ocultar al pie. En pantallas medianas y pequeñas pasa a ser un panel flotante.
 - **Adaptable:** columnas que se reparten el ancho (mínimo 300 px), desplazamiento horizontal si no caben; en pantallas pequeñas una columna por pantalla con encaje al desplazar. En iPad, arrastrar tarjetas requiere mantener pulsado un instante.
 - **Comentarios de Todoist:** se ven en el panel de la tarea (del más antiguo al más reciente, texto plano con saltos de línea; los adjuntos como enlace). Se pueden añadir, editar y borrar, y se guardan en Todoist al momento, aparte del botón Guardar. Si una tarea tiene comentarios, su tarjeta muestra un icono de bocadillo a la derecha del nombre (sin número).
+- **Gastos** (antetítulo "Pagos recurrentes"; botón principal "Nuevo gasto"): colecciones `gastos` (`{id, concepto, proveedor, categoria, importe, periodicidad, meses: [1-12], dia, proximoPago: 'AAAA-MM-DD'|null, cobro: 'automatico'|'manual', notas, activo, creado}`) y `pagos` (`{id, gastoId, concepto, categoria, fecha: 'AAAA-MM-DD', importe, notas}`; el pago copia concepto y categoría para que el historial sobreviva al borrado del gasto).
+  - Categorías fijas: Seguros, Impuestos, Comunidad, Inversiones, Suscripciones, Consumos, Préstamos, Alquileres, Streaming, Otros (cada una con su color).
+  - **Próximo vencimiento** (misma lógica que el portal anterior, comprobada con sus datos reales): vencimientos según los meses de cobro y el día (ajustado al último día del mes si no existe); el último pago cubre el vencimiento que cae entre 15 días antes y 20 después, y toca el siguiente; sin pago, el primero desde hoy. La fecha fija `proximoPago` manda mientras no haya un pago que la cubra.
+  - Pestaña **Próximos**: totales de próximos 30 días, hasta fin de mes y vencidos; filtro por categoría; cada gasto con su vencimiento, importe y botón Pagar; los pausados (`activo: false`) abajo y fuera de los totales. Pestaña **Historial**: pagos del más reciente al más antiguo, filtros por categoría y año, total y borrar. "Registrar pago" permite elegir gasto, fecha, importe y notas.
+  - Importes escritos a mano en campo de texto con teclado decimal: se admite coma o punto.
+  - Pendiente (segundo paso): pestaña **Resumen** con gráfico de gasto por mes y totales por categoría.
 - La descripción de las tareas de Todoist no se muestra ni se edita.
 - Las subtareas de Todoist no se muestran por ahora.
 
@@ -119,8 +125,7 @@ Oscuro y elegante. Tipografía Manrope (Google Fonts) con alternativas del siste
 
 La App Registration ya existe (tipo SPA, cuentas de cualquier organización y personales, registrada por el usuario en el tenant del trabajo); su Client ID se introduce en Ajustes.
 
-1. **Bloques traídos de un portal anterior del usuario** (Cumpledías ya está hecho, en la pantalla Contactos) (web con servidor propio), rehechos con el estilo y la arquitectura de esta app. Cada uno es una colección del almacén y una pantalla en la barra lateral. Los datos reales se importan con un fichero generado fuera del repo; nunca se suben aquí.
-   - **Gastos y pagos:** gastos recurrentes (concepto, proveedor, categoría, importe, periodicidad, meses de cobro, día, fecha fija opcional, tipo de cobro, notas) e historial de pagos. Próximo vencimiento calculado con los meses de cobro y el último pago (tolerancia 15 días antes y 20 después). Resúmenes: próximos 30 días, hasta fin de mes y vencidos.
+1. **Bloques traídos de un portal anterior del usuario** (hechos: Cumpledías, en la pantalla Contactos, y Gastos y pagos) (web con servidor propio), rehechos con el estilo y la arquitectura de esta app. Cada uno es una colección del almacén y una pantalla en la barra lateral. Los datos reales se importan con un fichero generado fuera del repo; nunca se suben aquí.
    - **Consumos:** luz, gas y agua por mes (kWh o m³, costes, precio, periodo). Importar facturas PDF leyéndolas en el navegador (pdf.js incluido en el repo) y guardar el PDF en la carpeta de la app de OneDrive. Gráfica de este año frente al anterior (Chart.js incluido en el repo). Previsión del mes estimada con el historial (no hay contador en tiempo real fuera de casa).
    - **Inversiones:** precios y gráficas de mercado. BTC y ETH con datos públicos de Binance; SPY necesita un proveedor que admita llamadas desde el navegador, con clave gratuita introducida en Ajustes.
 2. **Trabajo: Microsoft Planner.** Misma App Registration. Login contra el tenant del trabajo (el Tenant ID lo introduce el usuario en Ajustes). Permiso delegado `Tasks.ReadWrite`. Mismo tablero y mismas etiquetas que Personal, con los buckets como columnas. El login solo se pide al sincronizar.
