@@ -1650,7 +1650,7 @@
       if (!g.calendario || g.activo === false) continue;
       const first = vencimientos(g, year, year + 1)[0];
       if (first === undefined) continue;
-      ev('gasto:' + g.id, g.concepto + ' · ' + fmtEur(g.importe), ymdOf(first), { recurrence: [gastoRRule(g)], colorId: '5' });
+      ev('gasto:' + g.id, g.concepto, ymdOf(first), { recurrence: [gastoRRule(g)], colorId: '5' });
     }
     // Tareas de Personal con fecha (solo si la tarea sigue en Todoist)
     for (const f of Object.values(S.datos.colecciones.fechasTareas || {})) {
