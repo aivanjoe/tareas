@@ -310,6 +310,7 @@
     switch (n) {
       case 'gastos': return 'Gasto ' + q(r.concepto) + ' ' + verbo;
       case 'pagos': return 'Pago de ' + q(r.concepto) + (r.fecha ? ' (' + r.fecha + ')' : '') + ' ' + verbo;
+      case 'repostajes': return 'Repostaje del ' + (r.fecha || '') + ' ' + verbo;
       case 'consumos': return 'Factura de ' + (r.tipo || 'consumo') + (r.fin ? ' hasta ' + r.fin : '') + ' ' + verba;
       case 'santos': return 'Santo ' + q(r.nombre) + ' ' + verbo;
       case 'etiquetas': return 'Etiqueta ' + q(r.name) + ' ' + verba;
@@ -2872,7 +2873,7 @@
     calendario: { title: 'Calendario', eyebrow: () => calCfg() ? calCfg().nombre : 'Google Calendar', add: 'Nuevo evento', el: 'viewCalendario', render: () => renderCal(), onAdd: () => openCalEvent(null) },
     contactos: { title: 'Contactos', eyebrow: 'Agenda y cumples', add: () => ctTab() === 'agenda' ? 'Nuevo contacto' : 'Elegir contactos', el: 'viewContactos', render: () => renderCumpledias(), onAdd: () => ctTab() === 'agenda' ? openEditContacto(null) : openCdPicker() },
     gastos: { title: 'Gastos', eyebrow: 'Pagos recurrentes', add: 'Nuevo gasto', el: 'viewGastos', render: () => renderGastos(), onAdd: () => openGasto(null) },
-    consumos: { title: 'Consumos', eyebrow: 'Luz, gas, agua y coche', add: () => cTipo === 'coche' ? 'Importar trayectos' : 'Subir facturas', el: 'viewConsumos', render: () => renderConsumos(), onAdd: () => cTipo === 'coche' ? pickTrayectos() : pickFacturas() },
+    consumos: { title: 'Consumos', eyebrow: 'Luz, gas, agua y coche', add: () => cTipo === 'coche' ? 'Repostar' : 'Subir facturas', el: 'viewConsumos', render: () => renderConsumos(), onAdd: () => cTipo === 'coche' ? openRepostaje(null) : pickFacturas() },
     auditoria: { title: 'Auditoría', eyebrow: 'Historial de cambios', add: 'Exportar CSV', addIcon: 'file', el: 'viewAuditoria', render: () => renderAuditoria(), onAdd: () => exportarAuditoria() }
   };
 
@@ -4662,7 +4663,7 @@
   // Colección "trayectos": un registro por trayecto, id "AAAA-MM-DD-HHMM" (fecha y hora de salida; el CSV
   // no trae identificador). Reimportar periodos que se solapan no duplica nada.
   const COCHE = { nombre: 'Coche', color: '#F29E4C' };
-  let kMetric = 'coste'; // coste | km | l100
+  let kMetric = 'gasolina'; // gasolina | coste | km | l100
   let kAbiertos = null;  // meses desplegados en el historial ("AAAA-MM"); null: el más reciente
   const trayectos = () => Object.values(S.datos.colecciones.trayectos || {});
   const fmtKm = n => (Math.round((n || 0) * 10) / 10).toLocaleString('es-ES') + '\u00a0km';
@@ -4781,6 +4782,7 @@
     }
     cTipo = 'coche';
     kAbiertos = null;
+    kHist = 'trayectos';
     if (S.ui.view === 'consumos') applyView();
     const partes = [];
     if (nuevos) partes.push(plural(nuevos, 'trayecto nuevo', 'trayectos nuevos'));
@@ -4801,28 +4803,166 @@
     return r;
   }
 
+  // ---- coche: repostajes apuntados a mano ----
+  // Colección "repostajes": {id, fecha, litros, importe, lleno, km (cuentakilómetros) | null, gasolinera, notas}.
+  // Sin llenar el depósito, el consumo de un repostaje suelto no es fiable; el de un periodo largo, sí:
+  // entre el primer repostaje A y el último B del periodo, litros = los echados después de A hasta B incluido,
+  // km = cuentakilómetros (B - A) o, si falta, los trayectos importados entre las dos fechas.
+  // El error es la diferencia de nivel del depósito entre A y B (cero si los dos fueron a lleno).
+  const repostajes = () => Object.values(S.datos.colecciones.repostajes || {});
+  const ordRep = (a, b) => a.fecha.localeCompare(b.fecha) || (a.km || 0) - (b.km || 0) || a.id.localeCompare(b.id);
+  const fmtLitros = l => (Math.round((l || 0) * 10) / 10).toLocaleString('es-ES') + ' l';
+  const fmtEurL = n => n.toLocaleString('es-ES', { minimumFractionDigits: 3, maximumFractionDigits: 3 }) + ' €/l';
+  let kHist = 'trayectos'; // trayectos | repostajes
+
+  function consumoReal(reps, desde) {
+    const list = reps.filter(r => !desde || r.fecha >= desde).sort(ordRep);
+    if (list.length < 2) return null;
+    const a = list[0], b = list[list.length - 1];
+    const litros = list.slice(1).reduce((s, r) => s + (r.litros || 0), 0);
+    const pagado = list.slice(1).reduce((s, r) => s + (r.importe || 0), 0);
+    let km = null, fuente = 'cuentakilómetros';
+    if (a.km && b.km && b.km > a.km) km = b.km - a.km;
+    else {
+      const tr = trayectos().filter(t => t.fecha > a.fecha && t.fecha <= b.fecha);
+      if (tr.length) { km = sumaTray(tr).km; fuente = 'trayectos importados'; }
+    }
+    if (!km || !litros) return null;
+    const tr = trayectos().filter(t => t.fecha > a.fecha && t.fecha <= b.fecha);
+    const sp = sumaTray(tr);
+    return { l100: litros / km * 100, km, litros, pagado, eurKm: pagado / km, exacto: !!(a.lleno && b.lleno), fuente, desde: a.fecha, hasta: b.fecha,
+      peugeot: sp.kmL > 0 && sp.litros > 0 ? sp.litros / sp.kmL * 100 : null };
+  }
+
+  function openRepostaje(id) {
+    const cur = id ? (S.datos.colecciones.repostajes || {})[id] : null;
+    const inp = (idAttr, attrs) => h('input', Object.assign({ class: 'input', id: idAttr, autocomplete: 'off' }, attrs));
+    const fecha = inp('rFecha', { type: 'date', value: cur ? cur.fecha : todayYmd(), max: todayYmd() });
+    const litros = inp('rLitros', { type: 'text', inputmode: 'decimal', placeholder: '0,00', value: cur ? String(cur.litros).replace('.', ',') : '' });
+    const importe = inp('rImporte', { type: 'text', inputmode: 'decimal', placeholder: '0,00', value: cur ? fmtNumInput(cur.importe) : '' });
+    const km = inp('rKm', { type: 'text', inputmode: 'numeric', placeholder: 'Opcional', value: cur && cur.km ? String(cur.km) : '' });
+    const gasolinera = inp('rGasolinera', { type: 'text', maxlength: '80', placeholder: 'Opcional', value: cur ? cur.gasolinera || '' : '' });
+    const notas = inp('rNotas', { type: 'text', maxlength: '200', placeholder: 'Opcional', value: cur ? cur.notas || '' : '' });
+    const lleno = h('input', { type: 'checkbox', id: 'rLleno' });
+    lleno.checked = !!(cur && cur.lleno);
+    const precio = h('p', { class: 'hint' });
+    const calc = () => {
+      const l = parseAmount(litros.value), e = parseAmount(importe.value);
+      precio.textContent = l > 0 && e > 0 ? 'Precio: ' + fmtEurL(e / l) : 'El precio por litro se calcula solo.';
+    };
+    litros.addEventListener('input', calc);
+    importe.addEventListener('input', calc);
+    calc();
+    let close = null;
+    const save = () => {
+      if (!isYmd(fecha.value)) { toast('Pon la fecha del repostaje.', 'error'); fecha.focus(); return; }
+      const l = parseAmount(litros.value), e = parseAmount(importe.value);
+      if (!(l > 0)) { toast('Pon los litros.', 'error'); litros.focus(); return; }
+      if (!(e > 0)) { toast('Pon el importe.', 'error'); importe.focus(); return; }
+      const kmTxt = km.value.trim().replace(/[.\s]/g, '');
+      if (kmTxt && !/^\d+$/.test(kmTxt)) { toast('Los km del cuentakilómetros, sin decimales.', 'error'); km.focus(); return; }
+      const k = kmTxt ? +kmTxt : null;
+      const recId = cur ? cur.id : 'r' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
+      if (k) {
+        const otros = repostajes().filter(r => r.id !== recId && r.km);
+        if (otros.some(r => (r.fecha < fecha.value && r.km > k) || (r.fecha > fecha.value && r.km < k))) {
+          toast('Esos km no cuadran con los de otros repostajes: revisa la fecha o los km.', 'error'); km.focus(); return;
+        }
+      }
+      const rec = { id: recId, fecha: fecha.value, litros: Math.round(l * 100) / 100, importe: Math.round(e * 100) / 100, lleno: lleno.checked, km: k,
+        gasolinera: gasolinera.value.trim(), notas: notas.value.trim() };
+      S.datos.colecciones.repostajes = Object.assign({}, S.datos.colecciones.repostajes, { [recId]: rec });
+      saveDatos();
+      cTipo = 'coche';
+      kHist = 'repostajes';
+      close();
+      if (S.ui.view === 'consumos') applyView();
+      if (!cur) toast('Repostaje apuntado.');
+    };
+    const borrar = () => {
+      if (!confirm('¿Borrar el repostaje del ' + fmtDay(utcDay(cur.fecha)) + '?')) return;
+      const rest = Object.assign({}, S.datos.colecciones.repostajes);
+      delete rest[cur.id];
+      S.datos.colecciones.repostajes = rest;
+      saveDatos();
+      close();
+      renderConsumos();
+    };
+    const fld = (label, forId, el) => h('div', { class: 'field' }, h('label', { class: 'field-label', for: forId }, label), el);
+    const body = h('div', { class: 'form' },
+      h('div', { class: 'form-row' }, fld('Fecha', 'rFecha', fecha), fld('Km del cuentakilómetros', 'rKm', km)),
+      h('p', { class: 'hint' }, 'Los km los ves en el cuadro o en MyPeugeot. Si los apuntas, el consumo real sale más exacto.'),
+      h('div', { class: 'form-row' }, fld('Litros', 'rLitros', litros), fld('Importe (€)', 'rImporte', importe)),
+      precio,
+      h('label', { class: 'check-line', for: 'rLleno' }, lleno, 'Depósito lleno'),
+      fld('Gasolinera', 'rGasolinera', gasolinera),
+      fld('Notas', 'rNotas', notas),
+      h('div', { class: 'row-actions modal-foot' },
+        cur ? h('button', { type: 'button', class: 'btn danger small', onclick: borrar }, 'Borrar') : null,
+        h('span', { class: 'spacer' }),
+        h('button', { type: 'button', class: 'btn subtle small', onclick: () => close() }, 'Cancelar'),
+        h('button', { type: 'button', class: 'btn primary small', onclick: save }, cur ? 'Guardar' : 'Apuntar')));
+    close = openModal(cur ? 'Editar repostaje' : 'Repostaje', body);
+    if (!cur) setTimeout(() => litros.focus(), 50);
+  }
+
   function renderCoche(root, cards) {
     const all = trayectos();
+    const reps = repostajes();
     const hoy = new Date(todayUtc());
     const y = hoy.getUTCFullYear(), mHoy = hoy.getUTCMonth() + 1;
     const mesKey = t => t.fecha.slice(0, 7);
     const deMes = (yr, m) => all.filter(t => +t.fecha.slice(0, 4) === yr && +t.fecha.slice(5, 7) === m);
+    const repMes = (yr, m) => reps.filter(r => +r.fecha.slice(0, 4) === yr && (!m || +r.fecha.slice(5, 7) === m));
 
-    // Resumen: este mes y lo que va de año
-    const bloque = (label, list) => {
+    // Resumen: este mes, lo que va de año y consumo real
+    const bloque = (label, list, rlist) => {
       const s = sumaTray(list);
-      const partes = s.n ? [fmtKm(s.km), plural(s.n, 'trayecto'), fmtL100(s.litros, s.kmL), s.litros ? (Math.round(s.litros * 10) / 10).toLocaleString('es-ES') + ' l' : null].filter(Boolean) : ['sin trayectos'];
+      const tray = s.n ? [fmtKm(s.km), plural(s.n, 'trayecto'), fmtL100(s.litros, s.kmL)].filter(Boolean).join(' · ') : 'sin trayectos';
+      if (!reps.length) {
+        return h('div', { class: 'est-main' },
+          h('span', { class: 'stat-label' }, label),
+          h('span', { class: 'est-value' }, fmtEur(s.coste)),
+          h('span', { class: 'stat-sub' }, s.n ? tray + (s.litros ? ' · ' + fmtLitros(s.litros) : '') : 'sin trayectos'));
+      }
+      const pag = rlist.reduce((a, r) => a + r.importe, 0), lit = rlist.reduce((a, r) => a + r.litros, 0);
       return h('div', { class: 'est-main' },
-        h('span', { class: 'stat-label' }, label),
-        h('span', { class: 'est-value' }, fmtEur(s.coste)),
-        h('span', { class: 'stat-sub' }, partes.join(' · ')));
+        h('span', { class: 'stat-label' }, label + ' · gasolina'),
+        h('span', { class: 'est-value' }, fmtEur(pag)),
+        h('span', { class: 'stat-sub' }, rlist.length ? [plural(rlist.length, 'repostaje'), fmtLitros(lit), fmtEurL(pag / lit)].join(' · ') : 'sin repostajes'),
+        h('span', { class: 'stat-sub' }, tray));
     };
-    const resumen = all.length ? h('section', { class: 'panel estimate car-sum' },
-      bloque(cap(MESES_LARGOS[mHoy - 1]) + ' ' + y, deMes(y, mHoy)),
-      bloque('Año ' + y, all.filter(t => +t.fecha.slice(0, 4) === y))) : null;
+    const hace3 = new Date(todayUtc() - 91 * DAY).toISOString().slice(0, 10);
+    let cr = consumoReal(reps, hace3), periodo = 'últimos 3 meses';
+    if (!cr) { cr = consumoReal(reps, null); periodo = 'desde el primer repostaje'; }
+    let realBlock = null;
+    if (reps.length) {
+      const partes = [];
+      if (cr) {
+        partes.push(periodo + ', ' + fmtKm(cr.km) + ' (' + cr.fuente + ')');
+        if (cr.peugeot) {
+          const dif = Math.round((cr.l100 / cr.peugeot - 1) * 100);
+          partes.push('MyPeugeot ' + (Math.round(cr.peugeot * 10) / 10).toLocaleString('es-ES') + ' (' + (dif > 0 ? '+' : '') + dif + ' %)');
+        }
+        partes.push(cr.eurKm.toLocaleString('es-ES', { maximumFractionDigits: 3 }) + ' €/km');
+      }
+      realBlock = h('div', { class: 'est-main' },
+        h('span', { class: 'stat-label' }, 'Consumo real'),
+        h('span', { class: 'est-value' }, cr ? (Math.round(cr.l100 * 10) / 10).toLocaleString('es-ES', { minimumFractionDigits: 1 }) + ' l/100 km' : '—'),
+        h('span', { class: 'stat-sub' }, cr ? partes.join(' · ') : 'Hace falta otro repostaje, con los km del cuentakilómetros o con los trayectos importados.'),
+        cr && !cr.exacto && cr.km < 3000 ? h('span', { class: 'stat-sub' }, 'Orientativo: con pocos km pesa cómo estaba el depósito.') : null);
+    }
+    const resumen = all.length || reps.length ? h('section', { class: 'panel estimate car-sum' },
+      bloque(cap(MESES_LARGOS[mHoy - 1]) + ' ' + y, deMes(y, mHoy), repMes(y, mHoy)),
+      bloque('Año ' + y, all.filter(t => +t.fecha.slice(0, 4) === y), repMes(y)),
+      realBlock) : null;
 
     // Gráfico: este año frente al anterior, por mes
     const serie = yr => Array.from({ length: 12 }, (_, m) => {
+      if (kMetric === 'gasolina') {
+        const rl = repMes(yr, m + 1);
+        return rl.length ? Math.round(rl.reduce((a, r) => a + r.importe, 0) * 100) / 100 : null;
+      }
       const list = deMes(yr, m + 1);
       if (!list.length) return null;
       const s = sumaTray(list);
@@ -4832,69 +4972,97 @@
     const cur = serie(y), prev = serie(y - 1);
     const hasData = cur.some(v => v !== null) || prev.some(v => v !== null);
     const metricSeg = h('div', { class: 'seg', role: 'group', 'aria-label': 'Ver' },
-      [['coste', 'Coste'], ['km', 'Km'], ['l100', 'L/100 km']].map(([k, label]) => h('button', { type: 'button', class: kMetric === k ? 'on' : '', 'aria-pressed': kMetric === k ? 'true' : 'false', onclick: () => { kMetric = k; renderConsumos(); } }, label)));
+      [['gasolina', 'Gasolina'], ['coste', 'Coste estimado'], ['km', 'Km'], ['l100', 'L/100 km']].map(([k, label]) => h('button', { type: 'button', class: kMetric === k ? 'on' : '', 'aria-pressed': kMetric === k ? 'true' : 'false', onclick: () => { kMetric = k; renderConsumos(); } }, label)));
     const canvas = h('canvas', { 'aria-label': 'Gráfico del coche: ' + y + ' frente a ' + (y - 1) });
+    const vacio = { gasolina: 'No hay repostajes de estos dos años.', coste: 'No hay trayectos de estos dos años.', km: 'No hay trayectos de estos dos años.', l100: 'No hay trayectos de estos dos años.' };
     const chartPanel = h('section', { class: 'panel' },
       h('div', { class: 'panel-head' }, h('h2', null, 'Coche · ' + (y - 1) + ' y ' + y),
         h('div', { class: 'legend' }, h('span', { class: 'lg prev' }, String(y - 1)), h('span', { class: 'lg cur', style: '--c:' + COCHE.color }, String(y))),
         metricSeg),
-      hasData ? h('div', { class: 'chart-box' }, canvas) : h('p', { class: 'muted empty-note' }, 'No hay trayectos de estos dos años.'));
+      kMetric === 'coste' ? h('p', { class: 'hint' }, 'Coste estimado por MyPeugeot con el precio por litro que tiene puesto la app.') : null,
+      hasData ? h('div', { class: 'chart-box' }, canvas) : h('p', { class: 'muted empty-note' }, vacio[kMetric]));
 
-    // Historial por meses, desplegables
-    const meses = [...new Set(all.map(mesKey))].sort().reverse();
-    if (!kAbiertos) kAbiertos = new Set(meses.slice(0, 1));
+    // Historial: trayectos (por meses desplegables) o repostajes
     const rows = h('div', { class: 'ev-list' });
-    const borrar = ids => {
-      const rest = Object.assign({}, S.datos.colecciones.trayectos);
-      for (const id of ids) delete rest[id];
-      S.datos.colecciones.trayectos = rest;
-      saveDatos();
-      renderConsumos();
-    };
-    for (const mk of meses) {
-      const list = all.filter(t => mesKey(t) === mk).sort((a, b) => b.id.localeCompare(a.id));
-      const s = sumaTray(list);
-      const abierto = kAbiertos.has(mk);
-      const nombre = cap(MESES_LARGOS[+mk.slice(5, 7) - 1]) + ' ' + mk.slice(0, 4);
-      const toggle = () => { if (abierto) kAbiertos.delete(mk); else kAbiertos.add(mk); renderConsumos(); };
-      rows.append(h('div', { class: 'ev consumo car-mes' + (abierto ? ' open' : '') },
-        h('button', { type: 'button', class: 'ev-main as-btn', 'aria-expanded': abierto ? 'true' : 'false', onclick: toggle },
-          h('span', { class: 'ev-name' }, nombre),
-          h('span', { class: 'ev-what' }, [plural(s.n, 'trayecto'), fmtKm(s.km), fmtL100(s.litros, s.kmL)].filter(Boolean).join(' · '))),
-        h('span', { class: 'ev-amount' }, fmtEur(s.coste)),
-        h('div', { class: 'row-tools' },
-          h('button', { type: 'button', class: 'icon-btn mini car-chev', 'aria-label': abierto ? 'Ocultar trayectos' : 'Ver trayectos', title: abierto ? 'Ocultar trayectos' : 'Ver trayectos', onclick: toggle }, ICON.right()),
-          h('button', { type: 'button', class: 'icon-btn mini', 'aria-label': 'Borrar el mes', title: 'Borrar el mes',
-            onclick: () => { if (confirm('¿Borrar los ' + plural(s.n, 'trayecto') + ' de ' + nombre.toLowerCase() + '? Puedes volver a importarlos.')) borrar(list.map(t => t.id)); } }, ICON.trash()))));
-      if (!abierto) continue;
-      const sub = h('div', { class: 'car-trips' });
-      for (const t of list) {
-        const dia = new Date(utcDay(t.fecha)).toLocaleDateString('es-ES', { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'UTC' });
-        sub.append(h('div', { class: 'ev consumo car-trip' },
-          h('div', { class: 'ev-main' },
-            h('span', { class: 'ev-name' }, cap(dia) + ' · ' + t.salida + (t.llegada ? ' → ' + t.llegada : '')),
-            h('span', { class: 'ev-what' }, [fmtMin(t.min), fmtKm(t.km), t.consumo !== null && t.consumo !== undefined ? t.consumo.toLocaleString('es-ES') + '\u00a0l/100\u00a0km' : null].filter(Boolean).join(' · '))),
-          h('span', { class: 'ev-amount' }, t.coste !== null && t.coste !== undefined ? fmtEur(t.coste) : '—'),
+    if (kHist === 'trayectos') {
+      const meses = [...new Set(all.map(mesKey))].sort().reverse();
+      if (!kAbiertos) kAbiertos = new Set(meses.slice(0, 1));
+      const borrar = ids => {
+        const rest = Object.assign({}, S.datos.colecciones.trayectos);
+        for (const id of ids) delete rest[id];
+        S.datos.colecciones.trayectos = rest;
+        saveDatos();
+        renderConsumos();
+      };
+      for (const mk of meses) {
+        const list = all.filter(t => mesKey(t) === mk).sort((a, b) => b.id.localeCompare(a.id));
+        const s = sumaTray(list);
+        const abierto = kAbiertos.has(mk);
+        const nombre = cap(MESES_LARGOS[+mk.slice(5, 7) - 1]) + ' ' + mk.slice(0, 4);
+        const toggle = () => { if (abierto) kAbiertos.delete(mk); else kAbiertos.add(mk); renderConsumos(); };
+        rows.append(h('div', { class: 'ev consumo car-mes' + (abierto ? ' open' : '') },
+          h('button', { type: 'button', class: 'ev-main as-btn', 'aria-expanded': abierto ? 'true' : 'false', onclick: toggle },
+            h('span', { class: 'ev-name' }, nombre),
+            h('span', { class: 'ev-what' }, [plural(s.n, 'trayecto'), fmtKm(s.km), fmtL100(s.litros, s.kmL)].filter(Boolean).join(' · '))),
+          h('span', { class: 'ev-amount' }, fmtEur(s.coste)),
           h('div', { class: 'row-tools' },
-            h('button', { type: 'button', class: 'icon-btn mini', 'aria-label': 'Borrar trayecto', title: 'Borrar trayecto',
-              onclick: () => { if (confirm('¿Borrar el trayecto del ' + dia + ' a las ' + t.salida + '?')) borrar([t.id]); } }, ICON.trash()))));
+            h('button', { type: 'button', class: 'icon-btn mini car-chev', 'aria-label': abierto ? 'Ocultar trayectos' : 'Ver trayectos', title: abierto ? 'Ocultar trayectos' : 'Ver trayectos', onclick: toggle }, ICON.right()),
+            h('button', { type: 'button', class: 'icon-btn mini', 'aria-label': 'Borrar el mes', title: 'Borrar el mes',
+              onclick: () => { if (confirm('¿Borrar los ' + plural(s.n, 'trayecto') + ' de ' + nombre.toLowerCase() + '? Puedes volver a importarlos.')) borrar(list.map(t => t.id)); } }, ICON.trash()))));
+        if (!abierto) continue;
+        const sub = h('div', { class: 'car-trips' });
+        for (const t of list) {
+          const dia = new Date(utcDay(t.fecha)).toLocaleDateString('es-ES', { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'UTC' });
+          sub.append(h('div', { class: 'ev consumo car-trip' },
+            h('div', { class: 'ev-main' },
+              h('span', { class: 'ev-name' }, cap(dia) + ' · ' + t.salida + (t.llegada ? ' → ' + t.llegada : '')),
+              h('span', { class: 'ev-what' }, [fmtMin(t.min), fmtKm(t.km), t.consumo !== null && t.consumo !== undefined ? t.consumo.toLocaleString('es-ES') + ' l/100 km' : null].filter(Boolean).join(' · '))),
+            h('span', { class: 'ev-amount' }, t.coste !== null && t.coste !== undefined ? fmtEur(t.coste) : '—'),
+            h('div', { class: 'row-tools' },
+              h('button', { type: 'button', class: 'icon-btn mini', 'aria-label': 'Borrar trayecto', title: 'Borrar trayecto',
+                onclick: () => { if (confirm('¿Borrar el trayecto del ' + dia + ' a las ' + t.salida + '?')) borrar([t.id]); } }, ICON.trash()))));
+        }
+        rows.append(sub);
       }
-      rows.append(sub);
+      if (!meses.length) rows.append(h('p', { class: 'muted empty-note' },
+        'En la app MyPeugeot: Conducción → Gestionar tus trayectos → los tres puntos de arriba → Exportar, en CSV. Guárdalo en Archivos o en OneDrive y pulsa Importar trayectos.'));
+    } else {
+      const ord = reps.slice().sort(ordRep);
+      for (let i = ord.length - 1; i >= 0; i--) {
+        const r = ord[i], ant = ord[i - 1];
+        const det = [fmtLitros(r.litros), fmtEurL(r.importe / r.litros)];
+        if (r.km) det.push(r.km.toLocaleString('es-ES') + ' km');
+        if (r.lleno) det.push('lleno');
+        // Consumo del tramo: solo exacto de lleno a lleno con los km de los dos
+        if (ant && r.lleno && ant.lleno && r.km && ant.km && r.km > ant.km) det.push('tramo ' + (Math.round(r.litros / (r.km - ant.km) * 1000) / 10).toLocaleString('es-ES') + ' l/100 km');
+        if (r.gasolinera) det.push(r.gasolinera);
+        rows.append(h('div', { class: 'ev consumo' },
+          h('button', { type: 'button', class: 'ev-main as-btn', onclick: () => openRepostaje(r.id) },
+            h('span', { class: 'ev-name' }, cap(new Date(utcDay(r.fecha)).toLocaleDateString('es-ES', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' }))),
+            h('span', { class: 'ev-what' }, det.join(' · '))),
+          h('span', { class: 'ev-amount' }, fmtEur(r.importe)),
+          h('div', { class: 'row-tools' },
+            h('button', { type: 'button', class: 'icon-btn mini', 'aria-label': 'Editar', title: 'Editar', onclick: () => openRepostaje(r.id) }, ICON.edit()))));
+      }
+      if (!ord.length) rows.append(h('p', { class: 'muted empty-note' },
+        'Apunta cada repostaje con el botón Repostar: litros e importe del tique y, si puedes, los km del cuadro.'));
     }
-    if (!meses.length) rows.append(h('p', { class: 'muted empty-note' },
-      'En la app MyPeugeot: Conducción → Gestionar tus trayectos → los tres puntos de arriba → Exportar, en CSV. Guárdalo en Archivos o en OneDrive y pulsa Importar trayectos.'));
 
-    const toolbar = h('div', { class: 'g-toolbar' }, h('span'),
+    const histSeg = h('div', { class: 'seg', role: 'group', 'aria-label': 'Historial' },
+      [['trayectos', 'Trayectos'], ['repostajes', 'Repostajes']].map(([k, label]) => h('button', { type: 'button', class: kHist === k ? 'on' : '', 'aria-pressed': kHist === k ? 'true' : 'false', onclick: () => { kHist = k; renderConsumos(); } }, label)));
+    const toolbar = h('div', { class: 'g-toolbar' }, histSeg,
       h('div', { class: 'row-actions' },
-        h('button', { type: 'button', class: 'btn ghost small', onclick: pickTrayectos }, ICON.file(), 'Importar trayectos')));
+        kHist === 'trayectos'
+          ? h('button', { type: 'button', class: 'btn ghost small', onclick: pickTrayectos }, ICON.file(), 'Importar trayectos')
+          : h('button', { type: 'button', class: 'btn ghost small', onclick: () => openRepostaje(null) }, ICON.plus(), 'Repostar')));
 
     root.replaceChildren(...[cards, resumen, chartPanel,
-      h('section', { class: 'panel' }, h('div', { class: 'panel-head' }, h('h2', null, 'Historial · Coche'), toolbar), rows)].filter(Boolean));
+      h('section', { class: 'panel' }, h('div', { class: 'panel-head' }, h('h2', null, 'Historial · Coche')), toolbar, rows)].filter(Boolean));
 
     if (chartObj) { chartObj.destroy(); chartObj = null; }
     if (hasData) {
-      const fmt = v => kMetric === 'coste' ? fmtEur(v) : kMetric === 'km' ? fmtKm(v) : v.toLocaleString('es-ES') + ' l/100 km';
-      drawBars(canvas, prev, cur, y, COCHE.color, fmt, v => kMetric === 'coste' ? v + ' €' : v);
+      const fmt = v => kMetric === 'km' ? fmtKm(v) : kMetric === 'l100' ? v.toLocaleString('es-ES') + ' l/100 km' : fmtEur(v);
+      drawBars(canvas, prev, cur, y, COCHE.color, fmt, v => kMetric === 'coste' || kMetric === 'gasolina' ? v + ' €' : v);
     }
   }
 
@@ -4937,12 +5105,18 @@
       const l = latest(k);
       return pick(k, T.color, T.nombre, l && l.coste !== null ? fmtEur(l.coste) : '—', l ? MESES_CORTOS[l.mes - 1].toLowerCase() + ' ' + l.anio : 'sin datos');
     }));
-    // Coche: el último mes con trayectos
-    const tray = trayectos();
-    const ultMes = tray.reduce((m, t) => t.fecha.slice(0, 7) > m ? t.fecha.slice(0, 7) : m, '');
-    const sMes = ultMes ? sumaTray(tray.filter(t => t.fecha.startsWith(ultMes))) : null;
-    cards.append(pick('coche', COCHE.color, COCHE.nombre, sMes ? fmtEur(sMes.coste) : '—',
-      sMes ? MESES_CORTOS[+ultMes.slice(5, 7) - 1].toLowerCase() + ' ' + ultMes.slice(0, 4) + ' · ' + fmtKm(sMes.km) : 'sin datos'));
+    // Coche: lo pagado en gasolina el último mes con repostajes; sin repostajes, lo estimado por los trayectos
+    const ultimo = list => list.reduce((m, t) => t.fecha.slice(0, 7) > m ? t.fecha.slice(0, 7) : m, '');
+    const mesCorto = mk => MESES_CORTOS[+mk.slice(5, 7) - 1].toLowerCase() + ' ' + mk.slice(0, 4);
+    const reps = repostajes(), tray = trayectos();
+    if (reps.length) {
+      const mk = ultimo(reps), rl = reps.filter(r => r.fecha.startsWith(mk));
+      cards.append(pick('coche', COCHE.color, COCHE.nombre, fmtEur(rl.reduce((a, r) => a + r.importe, 0)), mesCorto(mk) + ' · ' + plural(rl.length, 'repostaje')));
+    } else {
+      const mk = ultimo(tray);
+      const sMes = mk ? sumaTray(tray.filter(t => t.fecha.startsWith(mk))) : null;
+      cards.append(pick('coche', COCHE.color, COCHE.nombre, sMes ? fmtEur(sMes.coste) : '—', sMes ? mesCorto(mk) + ' · ' + fmtKm(sMes.km) : 'sin datos'));
+    }
     if (cTipo === 'coche') return renderCoche(root, cards);
 
     const T = TIPOS[cTipo];
