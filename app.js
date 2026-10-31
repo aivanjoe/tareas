@@ -21,6 +21,7 @@
     base: 'mp.datos.base',
     onedrive: 'mp.onedrive',
     google: 'mp.google',
+    planner: 'mp.planner',
     ui: 'mp.ui'
   };
   const LEGACY_TAGS_KEY = 'mp.tags'; // formato anterior de las etiquetas, se migra al almacén
@@ -55,6 +56,8 @@
     odBase: store.get(KEYS.base, null),
     odState: 'idle', // idle | syncing | login | error
     gg: Object.assign({ clientId: '', account: '', token: null, exp: 0, syncedAt: null }, store.get(KEYS.google, {})),
+    pl: Object.assign({ account: '', plans: [], planId: null, buckets: [], tasks: null, cats: {}, syncedAt: null }, store.get(KEYS.planner, {})),
+    plState: 'idle', // idle | syncing | login | error
     ggState: 'idle', // idle | syncing | login | error
     ui: Object.assign({ sidebarHidden: false, projectId: null, view: 'personal' }, store.get(KEYS.ui, {})),
     filter: new Set(),
@@ -405,10 +408,13 @@
       // Vuelta del login de Microsoft (la respuesta llega en la dirección de la página)
       try {
         const res = await app.handleRedirectPromise();
-        if (res && res.account) odLoggedIn(res.account, true);
+        if (res && res.account) {
+          if (res.state === 'planner' || !isPersonalAcc(res.account)) plLoggedIn(res.account);
+          else odLoggedIn(res.account, true);
+        }
       } catch (e) {
         const cancelled = /access_denied|user_cancelled/.test((e && (e.errorCode + ' ' + e.message)) || '');
-        toast(cancelled ? 'Has cancelado la conexión con OneDrive.' : 'No se pudo conectar con OneDrive: ' + (e.errorMessage || e.message || e.errorCode), 'error', null, 10000);
+        toast(cancelled ? 'Has cancelado el inicio de sesión de Microsoft.' : 'No se pudo iniciar sesión con Microsoft: ' + (e.errorMessage || e.message || e.errorCode), 'error', null, 10000);
       }
       return app;
     });
@@ -416,13 +422,16 @@
     return msalLoading;
   }
 
+  // En la caché de MSAL conviven la cuenta personal (OneDrive) y la del trabajo (Planner):
+  // la personal es la del directorio de cuentas de Microsoft (consumers)
+  const CONSUMERS_TID = '9188040d-6c67-4c5b-b112-36a304b66dad';
+  const isPersonalAcc = a => a && (a.tenantId === CONSUMERS_TID || (a.idTokenClaims && a.idTokenClaims.tid === CONSUMERS_TID));
   function odAccount() {
     if (!msalApp) return null;
-    return msalApp.getActiveAccount() || msalApp.getAllAccounts()[0] || null;
+    return msalApp.getAllAccounts().find(isPersonalAcc) || null;
   }
 
   function odLoggedIn(account, notify) {
-    msalApp.setActiveAccount(account);
     S.od.account = account.username || account.name || 'Cuenta de Microsoft';
     saveOd();
     S.odState = 'idle';
@@ -579,6 +588,328 @@
   }
 
   const odPending = () => !S.odBase || stable(S.datos.colecciones) !== stable(normalizeDoc(S.odBase).colecciones);
+
+  // ---------- Trabajo: Microsoft Planner ----------
+  // Misma App Registration y misma MSAL que OneDrive, con la cuenta del trabajo (autoridad
+  // "organizations"). Graph v1.0; cada escritura lleva el etag de la tarea (If-Match).
+  const PL_SCOPES = ['Tasks.ReadWrite', 'User.Read'];
+  const ORG_AUTH = 'https://login.microsoftonline.com/organizations';
+  const GRAPH = 'https://graph.microsoft.com/v1.0';
+  // Colores aproximados de las 25 etiquetas de Planner (category1 … category25)
+  const PL_COLORS = [['Rosa', '#E68AC4'], ['Rojo', '#F0857A'], ['Amarillo', '#F5D76E'], ['Verde', '#8BD17C'], ['Azul', '#7FA2E0'],
+    ['Morado', '#B39DF0'], ['Bronce', '#D9A77A'], ['Lima', '#DBF266'], ['Aguamarina', '#6FC3E8'], ['Gris', '#9AA4B5'],
+    ['Plata', '#C9D0DC'], ['Marrón', '#B08968'], ['Arándano', '#C9607F'], ['Naranja', '#F2A65A'], ['Melocotón', '#F5B9A0'],
+    ['Caléndula', '#F2C14E'], ['Verde claro', '#B5E48C'], ['Verde oscuro', '#5C9E6E'], ['Verde azulado', '#5CCFB8'], ['Azul claro', '#A8C8F0'],
+    ['Azul oscuro', '#5F7FC0'], ['Lavanda', '#C9B6F2'], ['Ciruela', '#A7679F'], ['Gris claro', '#B8BFCB'], ['Gris oscuro', '#6E7A8E']];
+  class PlError extends Error {
+    constructor(kind, message) { super(message); this.kind = kind; }
+  }
+  const isWork = () => S.ui.view === 'trabajo';
+  const savePl = () => store.set(KEYS.planner, S.pl);
+  const plConnected = () => !!(S.od.clientId && S.pl.account);
+  function plAccount() {
+    if (!msalApp) return null;
+    return msalApp.getAllAccounts().find(a => !isPersonalAcc(a) && (!S.pl.account || a.username === S.pl.account)) || null;
+  }
+
+  async function plConnect() {
+    if (!S.od.clientId) { toast('Primero pon el Id. de aplicación de Microsoft en Ajustes → OneDrive.', 'error'); return; }
+    try {
+      if (!msalApp) await loadMsal();
+      clearStaleInteraction();
+      const req = { scopes: PL_SCOPES, authority: ORG_AUTH, prompt: 'select_account', state: 'planner' };
+      if (S.pl.account) { req.loginHint = S.pl.account; delete req.prompt; }
+      await msalApp.loginRedirect(req);
+    } catch (e) {
+      toast('No se pudo conectar con Planner: ' + (e.errorMessage || e.message || e.errorCode), 'error', null, 10000);
+    }
+  }
+
+  function plLoggedIn(account) {
+    S.pl.account = account.username || account.name || 'Cuenta del trabajo';
+    savePl();
+    S.plState = 'idle';
+    toast('Planner conectado');
+    plSync();
+  }
+
+  async function plDisconnect() {
+    try {
+      if (!msalApp) await loadMsal();
+      const acc = plAccount();
+      if (acc) await msalApp.clearCache({ account: acc });
+    } catch (e) { /* se olvida igualmente */ }
+    S.pl = { account: '', plans: [], planId: null, buckets: [], tasks: null, cats: {}, syncedAt: null };
+    savePl();
+    S.plState = 'idle';
+    renderAll();
+  }
+
+  async function plToken() {
+    if (!msalApp) await loadMsal();
+    const acc = plAccount();
+    if (!acc) throw new PlError('login', 'Conecta de nuevo tu cuenta del trabajo.');
+    try {
+      const r = await msalApp.acquireTokenSilent({ scopes: PL_SCOPES, account: acc, authority: 'https://login.microsoftonline.com/' + (acc.tenantId || 'organizations') });
+      return r.accessToken;
+    } catch (e) {
+      if (e instanceof msal.InteractionRequiredAuthError || (e && /interaction_required|login_required|consent_required|no_tokens_found/.test(e.errorCode || ''))) {
+        throw new PlError('login', 'La sesión del trabajo ha caducado. Vuelve a conectar.');
+      }
+      throw new PlError('network', 'No se pudo conectar con Microsoft. Revisa la conexión.');
+    }
+  }
+
+  async function plCall(method, path, body, etag) {
+    const token = await plToken();
+    const headers = { Authorization: 'Bearer ' + token };
+    if (body !== undefined) headers['Content-Type'] = 'application/json';
+    if (etag) headers['If-Match'] = etag;
+    if (method === 'PATCH') headers.Prefer = 'return=representation';
+    let r;
+    try { r = await fetch(/^https:/.test(path) ? path : GRAPH + path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) }); }
+    catch (e) { throw new PlError('network', 'No se pudo conectar con Planner. Revisa la conexión.'); }
+    if (r.status === 401) throw new PlError('login', 'La sesión del trabajo ha caducado. Vuelve a conectar.');
+    if (r.status === 412 || r.status === 409) throw new PlError('conflict', 'La tarea ha cambiado en Planner; se vuelve a leer.');
+    if (r.status === 403) throw new PlError('http', 'Planner no permite esta acción (403). Revisa el permiso Tasks.ReadWrite de la app.');
+    if (r.status === 204) return {};
+    let data = null;
+    try { data = await r.json(); } catch (e) { /* sin cuerpo */ }
+    if (!r.ok) throw new PlError('http', 'Planner respondió con un error (' + r.status + ')' + (data && data.error && data.error.message ? ': ' + data.error.message : '') + '.');
+    return data || {};
+  }
+  async function plList(path) {
+    let out = [], next = path;
+    while (next) { const r = await plCall('GET', next); out = out.concat(r.value || []); next = r['@odata.nextLink'] || null; }
+    return out;
+  }
+  const plEtag = o => o['@odata.etag'] || o.etag || null;
+  const plTaskFrom = t => ({
+    id: t.id, title: t.title || '', bucketId: t.bucketId, planId: t.planId, orderHint: t.orderHint || '',
+    cats: Object.keys(t.appliedCategories || {}).filter(k => t.appliedCategories[k]).sort((a, b) => +a.slice(8) - +b.slice(8)),
+    hasDescription: !!t.hasDescription, etag: plEtag(t)
+  });
+  const normTitle = s => String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
+
+  async function plSync(opts = {}) {
+    if (!plConnected() || S.plState === 'syncing') return;
+    S.plState = 'syncing';
+    renderSyncState();
+    try {
+      const plans = (await plList('/me/planner/plans')).map(p => ({ id: p.id, title: p.title }));
+      plans.sort((a, b) => a.title.localeCompare(b.title, 'es'));
+      let planId = plans.some(p => p.id === S.pl.planId) ? S.pl.planId : null;
+      if (!planId) planId = (plans.find(p => normTitle(p.title) === 'tareas mias') || plans[0] || {}).id || null;
+      let buckets = [], tasks = [], cats = Object.assign({}, S.pl.cats);
+      if (planId) {
+        const [bk, tk, det] = await Promise.all([
+          plList('/planner/plans/' + planId + '/buckets'),
+          plList('/planner/plans/' + planId + '/tasks'),
+          plCall('GET', '/planner/plans/' + planId + '/details')
+        ]);
+        buckets = bk.map(b => ({ id: b.id, name: b.name, orderHint: b.orderHint || '' })).sort((a, b) => a.orderHint < b.orderHint ? -1 : a.orderHint > b.orderHint ? 1 : 0);
+        tasks = tk.filter(t => (t.percentComplete || 0) < 100).map(plTaskFrom);
+        cats[planId] = { etag: plEtag(det), names: det.categoryDescriptions || {} };
+      }
+      Object.assign(S.pl, { plans, planId, buckets, tasks, cats, syncedAt: Date.now() });
+      savePl();
+      S.plState = 'idle';
+      if (opts.notify) toast('Sincronizado con Planner');
+    } catch (e) {
+      S.plState = e.kind === 'login' ? 'login' : 'error';
+      if (e.kind === 'login') toast(e.message, 'error', { label: 'Conectar', fn: plConnect }, 10000);
+      else toast(e.message || 'Error al leer Planner.', 'error');
+    } finally {
+      renderAll();
+    }
+  }
+
+  // Si una escritura falla se avisa y se vuelve a leer Planner
+  async function plRecover(e) {
+    if (e.kind === 'login') { S.plState = 'login'; renderSyncState(); toast(e.message, 'error', { label: 'Conectar', fn: plConnect }, 10000); return; }
+    toast(e.message || 'Planner no aceptó el cambio.', 'error');
+    await plSync();
+  }
+
+  const plTask = id => (S.pl.tasks || []).find(t => t.id === id);
+  // Etiquetas del plan: las que tienen nombre o están puestas en alguna tarea
+  function plTags() {
+    const names = ((S.pl.cats || {})[S.pl.planId] || {}).names || {};
+    const used = new Set((S.pl.tasks || []).filter(t => t.planId === S.pl.planId).flatMap(t => t.cats));
+    const out = [];
+    for (let i = 1; i <= 25; i++) {
+      const k = 'category' + i, name = names[k];
+      if (name || used.has(k)) out.push({ id: k, name: name || PL_COLORS[i - 1][0], color: PL_COLORS[i - 1][1] });
+    }
+    return out;
+  }
+  function plColumns() {
+    if (!S.pl.tasks || !S.pl.planId) return [];
+    // Planner ordena por orderHint (comparación ordinal; el menor va primero)
+    const ord = (a, b) => a.orderHint < b.orderHint ? -1 : a.orderHint > b.orderHint ? 1 : 0;
+    const items = S.pl.tasks.filter(t => t.planId === S.pl.planId);
+    return S.pl.buckets.map(b => ({ key: b.id, name: b.name, items: items.filter(t => t.bucketId === b.id).sort(ord) }));
+  }
+  function plReplace(t) {
+    const i = S.pl.tasks.findIndex(x => x.id === t.id);
+    if (i >= 0) S.pl.tasks[i] = t; else S.pl.tasks.push(t);
+    savePl();
+  }
+
+  async function plDrop(evt) {
+    const id = evt.item.dataset.taskId;
+    const toKey = evt.to.dataset.sectionKey, fromKey = evt.from.dataset.sectionKey;
+    if (fromKey === toKey && evt.oldIndex === evt.newIndex) return;
+    const t = plTask(id);
+    if (!t || id.startsWith('tmp-')) return;
+    // Nuevo orderHint entre las tarjetas vecinas: "<anterior> <siguiente>!" (Planner calcula el valor)
+    const ids = [...evt.to.querySelectorAll('.card')].map(el => el.dataset.taskId);
+    const pos = ids.indexOf(id);
+    const prev = pos > 0 ? plTask(ids[pos - 1]) : null, next = pos < ids.length - 1 ? plTask(ids[pos + 1]) : null;
+    const body = { orderHint: (prev ? prev.orderHint : '') + ' ' + (next ? next.orderHint : '') + '!' };
+    if (fromKey !== toKey) { body.bucketId = toKey; t.bucketId = toKey; }
+    // en pantalla, al momento: hint provisional entre los vecinos
+    t.orderHint = prev && next ? prev.orderHint + '~' : prev ? prev.orderHint + '~' : next ? '' : t.orderHint;
+    savePl();
+    setTimeout(renderBoard, 0);
+    try { plReplace(plTaskFrom(await plCall('PATCH', '/planner/tasks/' + id, body, t.etag))); renderBoard(); }
+    catch (e) { await plRecover(e); }
+  }
+
+  async function plComplete(id) {
+    const t = plTask(id);
+    if (!t) return;
+    S.pl.tasks = S.pl.tasks.filter(x => x.id !== id);
+    savePl();
+    renderBoard();
+    try {
+      const done = plTaskFrom(await plCall('PATCH', '/planner/tasks/' + id, { percentComplete: 100 }, t.etag));
+      toast('Tarea completada', 'ok', { label: 'Deshacer', fn: () => plUncomplete(done) });
+    } catch (e) { await plRecover(e); }
+  }
+  async function plUncomplete(t) {
+    S.pl.tasks.push(t);
+    savePl();
+    renderBoard();
+    try { plReplace(plTaskFrom(await plCall('PATCH', '/planner/tasks/' + t.id, { percentComplete: 0 }, t.etag))); renderBoard(); }
+    catch (e) { await plRecover(e); }
+  }
+
+  // Etiquetas de una tarea: appliedCategories con true/false para cada cambio
+  async function plSetCats(id, ids) {
+    const t = plTask(id);
+    if (!t || id.startsWith('tmp-')) return;
+    const applied = {};
+    for (const k of t.cats) if (!ids.includes(k)) applied[k] = false;
+    for (const k of ids) if (!t.cats.includes(k)) applied[k] = true;
+    if (!Object.keys(applied).length) return;
+    t.cats = ids.slice().sort((a, b) => +a.slice(8) - +b.slice(8));
+    savePl();
+    renderBoard();
+    try { plReplace(plTaskFrom(await plCall('PATCH', '/planner/tasks/' + id, { appliedCategories: applied }, t.etag))); renderBoard(); }
+    catch (e) { await plRecover(e); }
+  }
+
+  async function plSaveDrawer(ed, name, tagIds) {
+    if (ed.mode === 'edit') {
+      const t = plTask(ed.taskId);
+      if (!t) return;
+      const body = {};
+      if (name !== ed.original.trim()) { body.title = name; t.title = name; }
+      const applied = {};
+      for (const k of t.cats) if (!tagIds.includes(k)) applied[k] = false;
+      for (const k of tagIds) if (!t.cats.includes(k)) applied[k] = true;
+      if (Object.keys(applied).length) { body.appliedCategories = applied; t.cats = tagIds.slice(); }
+      const notesChanged = ed.notesLoaded && ed.notes !== ed.notesOrig;
+      if (notesChanged) t.hasDescription = !!ed.notes.trim();
+      savePl();
+      renderBoard();
+      try {
+        if (Object.keys(body).length) plReplace(plTaskFrom(await plCall('PATCH', '/planner/tasks/' + t.id, body, t.etag)));
+        if (notesChanged) {
+          await plCall('PATCH', '/planner/tasks/' + t.id + '/details', { description: ed.notes }, ed.detailsEtag);
+          const fresh = plTask(t.id);
+          if (fresh) { fresh.hasDescription = !!ed.notes.trim(); savePl(); }
+        }
+        renderBoard();
+      } catch (e) { await plRecover(e); }
+      return;
+    }
+    // Nueva tarea, al final de la columna
+    const col = plColumns().find(c => c.key === ed.sectionKey) || plColumns()[0];
+    if (!col) return;
+    const last = col.items[col.items.length - 1];
+    const tmp = { id: 'tmp-' + uid(), title: name, bucketId: col.key, planId: S.pl.planId, orderHint: (last ? last.orderHint : '') + '~', cats: tagIds.slice(), hasDescription: false, etag: null };
+    S.pl.tasks.push(tmp);
+    renderBoard();
+    const applied = {};
+    for (const k of tagIds) applied[k] = true;
+    try {
+      const created = await plCall('POST', '/planner/tasks', { planId: S.pl.planId, bucketId: col.key, title: name, orderHint: (last ? last.orderHint : '') + ' !', appliedCategories: applied });
+      S.pl.tasks = S.pl.tasks.filter(x => x.id !== tmp.id);
+      plReplace(plTaskFrom(created));
+      renderBoard();
+    } catch (e) {
+      S.pl.tasks = S.pl.tasks.filter(x => x.id !== tmp.id);
+      await plRecover(e);
+    }
+  }
+
+  // Notas de la tarea (campo "Notas" de Planner): se leen al abrir el panel y se guardan con Guardar
+  function plNotesSection(ed) {
+    const area = h('textarea', { class: 'input textarea', rows: '5', placeholder: 'Cargando notas…', 'aria-label': 'Notas', disabled: true });
+    area.addEventListener('input', () => { ed.notes = area.value; });
+    plCall('GET', '/planner/tasks/' + ed.taskId + '/details').then(d => {
+      if (S.editing !== ed) return;
+      ed.notes = ed.notesOrig = d.description || '';
+      ed.detailsEtag = plEtag(d);
+      ed.notesLoaded = true;
+      area.value = ed.notes;
+      area.disabled = false;
+      area.placeholder = 'Sin notas';
+    }).catch(e => {
+      area.placeholder = e.kind === 'login' ? 'Conecta tu cuenta del trabajo para ver las notas.' : 'No se pudieron leer las notas.';
+    });
+    return h('div', { class: 'field' }, h('label', { class: 'field-label' }, 'Notas'), area, h('p', { class: 'hint' }, 'Se guardan en Planner con «Guardar».'));
+  }
+
+  // Nombres de las etiquetas del plan (los colores los fija Planner)
+  function openPlLabels() {
+    const det = (S.pl.cats || {})[S.pl.planId];
+    if (!det) { toast('Primero sincroniza con Planner.', 'error'); return; }
+    const inputs = {};
+    const rows = PL_COLORS.map(([color, hex], i) => {
+      const k = 'category' + (i + 1);
+      const inp = h('input', { class: 'input tm-name', type: 'text', maxlength: '100', placeholder: color + ' (sin nombre)', 'aria-label': 'Nombre de la etiqueta ' + color });
+      inp.value = det.names[k] || '';
+      inputs[k] = inp;
+      return h('div', { class: 'tm-row' }, h('div', { class: 'tm-main' }, h('span', { class: 'swatch static', style: '--c:' + hex, title: color }), inp));
+    });
+    let close = null;
+    const save = async () => {
+      const changes = {};
+      for (const [k, inp] of Object.entries(inputs)) {
+        const v = inp.value.trim();
+        if (v !== (det.names[k] || '')) changes[k] = v || null;
+      }
+      close();
+      if (!Object.keys(changes).length) return;
+      Object.assign(det.names, changes);
+      savePl();
+      renderTagbar();
+      renderBoard();
+      try {
+        await plCall('PATCH', '/planner/plans/' + S.pl.planId + '/details', { categoryDescriptions: changes }, det.etag);
+        await plSync();
+      } catch (e) { await plRecover(e); }
+    };
+    close = openModal('Etiquetas de Planner', h('div', { class: 'form' },
+      h('p', { class: 'hint' }, 'Son las etiquetas de este plan en Planner: el nombre que pongas aquí se verá también allí. Los colores los fija Planner.'),
+      h('div', { class: 'tm-list pl-labels' }, rows),
+      h('div', { class: 'row-actions modal-foot' }, h('span', { class: 'spacer' }),
+        h('button', { type: 'button', class: 'btn subtle small', onclick: () => close() }, 'Cancelar'),
+        h('button', { type: 'button', class: 'btn primary small', onclick: save }, 'Guardar'))));
+  }
 
   // ---------- Google (contactos: lectura y escritura) ----------
   // OAuth 2.0 para aplicaciones de navegador (flujo implícito) por redirección: la página va a Google
@@ -862,6 +1193,7 @@
   }
 
   function columns() {
+    if (isWork()) return plColumns();
     const pid = currentProjectId();
     if (!pid) return [];
     const byOrder = (a, b) => a.child_order - b.child_order;
@@ -876,9 +1208,12 @@
     return cols;
   }
 
-  const tagById = id => S.tags.list.find(t => t.id === id);
-  const assigned = taskId => (S.tags.assign[taskId] || []).filter(id => tagById(id));
+  // Etiquetas del tablero activo: las de la app en Personal, las de Planner en Trabajo
+  const tagList = () => isWork() ? plTags() : S.tags.list;
+  const tagById = id => tagList().find(t => t.id === id);
+  const assigned = taskId => (isWork() ? ((plTask(taskId) || {}).cats || []) : (S.tags.assign[taskId] || [])).filter(id => tagById(id));
   const tagUsage = tagId => Object.values(S.tags.assign).filter(arr => arr.includes(tagId)).length;
+  const boardReady = () => isWork() ? !!(S.pl.tasks && S.pl.planId) : !!S.data;
 
   function isVisible(item) {
     if (!S.filter.size) return true;
@@ -907,6 +1242,10 @@
   function renderProjects() {
     const sel = document.getElementById('projectSelect');
     sel.replaceChildren();
+    if (isWork()) {
+      for (const p of S.pl.plans || []) sel.append(h('option', { value: p.id, selected: p.id === S.pl.planId }, p.title));
+      return;
+    }
     if (!S.data) return;
     const pid = currentProjectId();
     for (const p of S.data.projects) {
@@ -916,9 +1255,18 @@
 
   function renderSyncState() {
     const when = S.data ? relTime(S.data.syncedAt) : 'nunca';
-    const busy = S.syncing || S.odState === 'syncing';
-    document.getElementById('syncInfo').textContent = busy ? 'Sincronizando…' : 'Sincronizado ' + when;
+    const busy = S.syncing || S.odState === 'syncing' || S.plState === 'syncing';
+    const whenTop = isWork() ? (S.pl.syncedAt ? relTime(S.pl.syncedAt) : 'nunca') : when;
+    document.getElementById('syncInfo').textContent = busy ? 'Sincronizando…' : 'Sincronizado ' + whenTop;
     document.getElementById('syncSide').textContent = when;
+    const pl = document.getElementById('syncPl');
+    pl.hidden = !plConnected();
+    if (plConnected()) {
+      document.getElementById('syncPlState').textContent = S.plState === 'syncing' ? 'sincronizando…'
+        : S.plState === 'login' ? 'reconectar' : S.plState === 'error' ? 'con error'
+        : S.pl.syncedAt ? relTime(S.pl.syncedAt) : 'nunca';
+      pl.classList.toggle('warn', S.plState === 'login' || S.plState === 'error');
+    }
     const od = document.getElementById('syncOd');
     od.hidden = !odConnected();
     if (odConnected()) {
@@ -948,10 +1296,11 @@
     const bar = document.getElementById('tagbar');
     bar.replaceChildren();
     bar.classList.toggle('filtering', S.filter.size > 0);
+    const tags = tagList();
     bar.append(h('span', { class: 'tagbar-label' }, ICON.tag(),
-      h('span', null, S.tags.list.length ? 'Arrastra a una tarea · pulsa para filtrar' : 'Aún no tienes etiquetas')));
+      h('span', null, tags.length ? 'Arrastra a una tarea · pulsa para filtrar' : isWork() ? 'Este plan aún no tiene etiquetas' : 'Aún no tienes etiquetas')));
 
-    for (const t of S.tags.list) {
+    for (const t of tags) {
       const pill = h('button', {
         type: 'button',
         class: 'tag-pill' + (S.filter.has(t.id) ? ' active' : ''),
@@ -966,8 +1315,8 @@
     if (S.filter.size) {
       end.append(h('button', { type: 'button', class: 'btn subtle small', onclick: () => { S.filter.clear(); renderTagbar(); renderBoard(); } }, 'Quitar filtro'));
     }
-    end.append(h('button', { type: 'button', class: 'btn subtle small', onclick: openTagManager },
-      S.tags.list.length ? 'Gestionar' : 'Crear etiquetas'));
+    end.append(h('button', { type: 'button', class: 'btn subtle small', onclick: isWork() ? openPlLabels : openTagManager },
+      tags.length ? 'Gestionar' : 'Crear etiquetas'));
     bar.append(end);
   }
 
@@ -976,7 +1325,13 @@
     S.sortables.forEach(s => s.destroy());
     S.sortables = [];
     board.replaceChildren();
-    if (!S.data) return;
+    if (isWork() && !plConnected()) {
+      board.append(h('div', { class: 'board-empty' },
+        h('p', null, 'Conecta tu cuenta del trabajo para ver aquí tus tareas de Planner.'),
+        h('button', { type: 'button', class: 'btn primary small', onclick: S.od.clientId ? plConnect : openSettings }, S.od.clientId ? 'Conectar con Planner' : 'Ir a Ajustes')));
+      return;
+    }
+    if (!boardReady()) return;
 
     for (const col of columns()) {
       const visible = col.items.filter(isVisible);
@@ -1011,7 +1366,10 @@
   function renderCard(item) {
     const tags = assigned(item.id).map(tagById);
     const pending = item.id.startsWith('tmp-');
-    const hasNotes = (S.data.notes || []).some(n => n.item_id === item.id);
+    const work = isWork();
+    const hasNotes = work ? item.hasDescription : (S.data.notes || []).some(n => n.item_id === item.id);
+    const title = work ? item.title : cleanTitle(item.content);
+    const notesLabel = work ? 'Tiene notas' : 'Tiene comentarios';
     return h('div', {
       class: 'card' + (pending ? ' pending' : '') + (hasNotes ? ' has-notes' : ''),
       dataset: { taskId: item.id },
@@ -1022,10 +1380,10 @@
         onclick: e => { e.stopPropagation(); completeTask(item.id); }
       }),
       h('button', {
-        type: 'button', class: 'card-title', title: cleanTitle(item.content),
+        type: 'button', class: 'card-title', title,
         onclick: () => { if (!pending) openEdit(item.id); }
-      }, cleanTitle(item.content)),
-      hasNotes ? h('span', { class: 'card-notes', title: 'Tiene comentarios', 'aria-label': 'Tiene comentarios' }, ICON.comment()) : null,
+      }, title),
+      hasNotes ? h('span', { class: 'card-notes', title: notesLabel, 'aria-label': notesLabel }, ICON.comment()) : null,
       tags.length ? h('span', { class: 'card-tags' },
         tags.map(t => h('span', { class: 'mini-tag', style: '--c:' + t.color }, t.name))) : null
     );
@@ -1033,6 +1391,7 @@
 
   // ---------- acciones sobre tareas ----------
   async function onCardDrop(evt) {
+    if (isWork()) return plDrop(evt);
     const id = evt.item.dataset.taskId;
     const fromKey = evt.from.dataset.sectionKey;
     const toKey = evt.to.dataset.sectionKey;
@@ -1067,6 +1426,7 @@
   }
 
   async function completeTask(id) {
+    if (isWork()) return plComplete(id);
     const idx = S.data.items.findIndex(i => i.id === id);
     if (idx < 0) return;
     const [item] = S.data.items.splice(idx, 1);
@@ -1092,6 +1452,7 @@
 
   function assignTag(taskId, tagId) {
     if (!taskId || taskId.startsWith('tmp-')) return;
+    if (isWork()) { const cur = assigned(taskId); if (!cur.includes(tagId)) plSetCats(taskId, cur.concat(tagId)); return; }
     const list = S.tags.assign[taskId] || [];
     if (list.includes(tagId)) return;
     S.tags.assign[taskId] = list.concat(tagId);
@@ -1163,15 +1524,16 @@
 
   // ---------- panel de tarea (nueva / editar) ----------
   function openNew(sectionKey, fromHeader) {
-    if (!S.data) return;
-    S.editing = { mode: 'new', sectionKey, fromHeader, name: '', tagIds: [] };
+    if (!boardReady()) return;
+    S.editing = { mode: 'new', sectionKey, fromHeader, name: '', tagIds: [], work: isWork() };
     renderDrawer();
   }
 
   function openEdit(taskId) {
-    const item = S.data.items.find(i => i.id === taskId);
+    const item = isWork() ? plTask(taskId) : S.data.items.find(i => i.id === taskId);
     if (!item) return;
-    S.editing = { mode: 'edit', taskId, name: item.content, original: item.content, tagIds: assigned(taskId).slice() };
+    const name = isWork() ? item.title : item.content;
+    S.editing = { mode: 'edit', taskId, name, original: name, tagIds: assigned(taskId).slice(), work: isWork() };
     renderDrawer();
   }
 
@@ -1192,9 +1554,9 @@
     drawer.replaceChildren();
     if (!ed) return;
 
-    const item = ed.mode === 'edit' ? S.data.items.find(i => i.id === ed.taskId) : null;
+    const item = ed.mode === 'edit' ? (isWork() ? plTask(ed.taskId) : S.data.items.find(i => i.id === ed.taskId)) : null;
     const where = ed.mode === 'edit'
-      ? 'en ' + columnName(item && item.section_id ? item.section_id : 'none')
+      ? 'en ' + columnName(isWork() ? item && item.bucketId : item && item.section_id ? item.section_id : 'none')
       : 'en ' + columnName(ed.sectionKey);
 
     const nameInput = h('input', {
@@ -1207,7 +1569,7 @@
     const chips = h('div', { class: 'chips' });
     const drawChips = () => {
       chips.replaceChildren();
-      for (const t of S.tags.list) {
+      for (const t of tagList()) {
         const on = ed.tagIds.includes(t.id);
         chips.append(h('button', {
           type: 'button', class: 'chip' + (on ? ' on' : ''), style: '--c:' + t.color, 'aria-pressed': on ? 'true' : 'false',
@@ -1220,7 +1582,7 @@
     };
     drawChips();
 
-    const commentsField = ed.mode === 'edit' && !ed.taskId.startsWith('tmp-') ? commentsSection(ed.taskId) : null;
+    const commentsField = ed.mode === 'edit' && !ed.taskId.startsWith('tmp-') ? (isWork() ? plNotesSection(ed) : commentsSection(ed.taskId)) : null;
 
     let columnField = null;
     if (ed.mode === 'new' && ed.fromHeader) {
@@ -1241,10 +1603,10 @@
       columnField,
       h('div', { class: 'field' },
         h('span', { class: 'field-label' }, 'Etiquetas'),
-        S.tags.list.length ? chips : h('p', { class: 'hint' }, 'Todavía no has creado etiquetas.'),
-        S.tags.list.length
+        tagList().length ? chips : h('p', { class: 'hint' }, isWork() ? 'Este plan aún no tiene etiquetas.' : 'Todavía no has creado etiquetas.'),
+        tagList().length
           ? h('p', { class: 'hint' }, 'Pulsa una etiqueta para asignarla o quitarla.')
-          : h('div', null, h('button', { type: 'button', class: 'btn ghost small', onclick: openTagManager }, 'Crear etiquetas'))),
+          : h('div', null, h('button', { type: 'button', class: 'btn ghost small', onclick: isWork() ? openPlLabels : openTagManager }, 'Crear etiquetas'))),
       commentsField,
       h('div', { class: 'drawer-foot' },
         ed.mode === 'edit'
@@ -1384,6 +1746,7 @@
     }
     const tagIds = ed.tagIds.filter(id => tagById(id));
     closeDrawer();
+    if (ed.work) return plSaveDrawer(ed, name, tagIds);
 
     if (ed.mode === 'edit') {
       const item = S.data.items.find(i => i.id === ed.taskId);
@@ -1706,6 +2069,42 @@
     return box;
   }
 
+  // Ajustes · Planner (cuenta del trabajo, misma App Registration que OneDrive)
+  function plSection() {
+    const box = h('div', { class: 'modal-section' });
+    const draw = () => {
+      const intro = h('p', { class: 'muted' }, 'Tus tareas de Microsoft Planner en la pantalla Trabajo, con la cuenta del trabajo. Usa el mismo Id. de aplicación que OneDrive.');
+      if (!S.od.clientId) {
+        box.replaceChildren(h('h3', null, 'Trabajo (Planner)'), intro, h('p', { class: 'hint' }, 'Pon primero el Id. de aplicación en la sección OneDrive.'));
+        return;
+      }
+      if (!plConnected()) {
+        box.replaceChildren(h('h3', null, 'Trabajo (Planner)'), intro,
+          h('div', { class: 'row-actions' }, h('button', { type: 'button', class: 'btn primary small', onclick: () => { plConnect(); } }, 'Conectar con Planner')));
+        return;
+      }
+      const plan = (S.pl.plans || []).find(p => p.id === S.pl.planId);
+      box.replaceChildren(h('h3', null, 'Trabajo (Planner)'),
+        h('p', { class: 'muted' }, 'Conectado como ', h('strong', null, S.pl.account), '.'),
+        h('p', { class: 'muted' }, (plan ? 'Plan: ' + plan.title + '. ' : '') + (S.plState === 'login' ? 'La sesión ha caducado: pulsa Reconectar.' : S.pl.syncedAt ? 'Última sincronización: ' + relTime(S.pl.syncedAt) + '.' : 'Sin sincronizar todavía.')),
+        h('div', { class: 'row-actions' },
+          S.plState === 'login'
+            ? h('button', { type: 'button', class: 'btn primary small', onclick: () => { plConnect(); } }, 'Reconectar')
+            : h('button', { type: 'button', class: 'btn ghost small', onclick: () => plSync({ notify: true }) }, 'Sincronizar ahora'),
+          h('button', {
+            type: 'button', class: 'btn subtle small',
+            onclick: async () => {
+              if (!confirm('¿Desconectar Planner en este navegador? En Planner no se borra nada.')) return;
+              await plDisconnect();
+              draw();
+            }
+          }, 'Desconectar')));
+    };
+    draw();
+    const timer = setInterval(() => { if (!box.isConnected) clearInterval(timer); else if (!(box.contains(document.activeElement) && document.activeElement.tagName === 'INPUT')) draw(); }, 1000);
+    return box;
+  }
+
   // Ajustes · Google
   function ggSection() {
     const box = h('div', { class: 'modal-section' });
@@ -1821,6 +2220,7 @@
         h('p', { class: 'muted' }, 'Crea, renombra, ordena y elige el color de las etiquetas que arrastras a las tareas.'),
         h('div', { class: 'row-actions' }, h('button', { type: 'button', class: 'btn ghost small', onclick: () => { close(); openTagManager(); } }, 'Gestionar etiquetas'))),
       odSection(),
+      plSection(),
       ggSection(),
       h('div', { class: 'modal-section' },
         h('h3', null, 'Copia de seguridad'),
@@ -1852,7 +2252,8 @@
   // ---------- pantallas ----------
   // Pantallas propias: sección en index.html (#view<Nombre>), función que la pinta y acción del botón principal
   const VIEWS = {
-    personal: { title: 'Personal', add: 'Añadir tarea' },
+    personal: { title: 'Personal', add: 'Añadir tarea', board: 'Todoist' },
+    trabajo: { title: 'Trabajo', add: 'Añadir tarea', board: 'Planner' },
     contactos: { title: 'Contactos', eyebrow: 'Agenda y cumples', add: () => ctTab() === 'agenda' ? 'Nuevo contacto' : 'Elegir contactos', el: 'viewContactos', render: () => renderCumpledias(), onAdd: () => ctTab() === 'agenda' ? openEditContacto(null) : openCdPicker() },
     gastos: { title: 'Gastos', eyebrow: 'Pagos recurrentes', add: 'Nuevo gasto', el: 'viewGastos', render: () => renderGastos(), onAdd: () => openGasto(null) },
     consumos: { title: 'Consumos', eyebrow: 'Luz, gas y agua', add: 'Subir facturas', el: 'viewConsumos', render: () => renderConsumos(), onAdd: () => pickFacturas() }
@@ -1861,7 +2262,8 @@
   function applyView() {
     if (S.ui.view === 'cumpledias') S.ui.view = 'contactos'; // nombre anterior de la pantalla
     if (!VIEWS[S.ui.view]) S.ui.view = 'personal';
-    const v = S.ui.view, cfg = VIEWS[v], board = v === 'personal';
+    const v = S.ui.view, cfg = VIEWS[v], board = !!cfg.board;
+    if (board) document.getElementById('eyebrowSrc').textContent = cfg.board;
     document.querySelectorAll('.nav-item[data-view]').forEach(a => {
       const on = a.dataset.view === v;
       a.classList.toggle('active', on);
@@ -1881,10 +2283,11 @@
 
   function showView(v) {
     if (S.editing) closeDrawer();
+    if (VIEWS[v] && VIEWS[v].board && v !== S.ui.view) S.filter.clear();
     S.ui.view = v;
     saveUi();
     if (SMALL.matches) toggleSidebar(false);
-    applyView();
+    if (VIEWS[v] && VIEWS[v].board) renderAll(); else applyView();
   }
 
   // ---------- contactos: cumpledías y cumpleaños ----------
@@ -3274,6 +3677,8 @@
       else syncDatos();
       // Contactos de Google: solo si el permiso sigue vigente (no se sale de la página sin pedirlo)
       if (ggConnected() && ggTokenOk()) syncContactos();
+      // Planner: si la sesión del trabajo caducó, este clic lleva a reconectar
+      if (plConnected()) { if (S.plState === 'login') plConnect(); else plSync(); }
       doSync();
     });
     document.getElementById('addBtn').addEventListener('click', () => {
@@ -3288,9 +3693,15 @@
     }));
     document.getElementById('openSettings').addEventListener('click', () => { if (SMALL.matches) toggleSidebar(false); openSettings(); });
     document.getElementById('projectSelect').addEventListener('change', e => {
+      S.filter.clear();
+      if (isWork()) {
+        S.pl.planId = e.target.value;
+        savePl();
+        plSync();
+        return;
+      }
       S.ui.projectId = e.target.value;
       saveUi();
-      S.filter.clear();
       renderAll();
     });
     document.addEventListener('keydown', e => {

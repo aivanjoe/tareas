@@ -17,7 +17,7 @@ Cualquier identificador que la app necesite (token de Todoist, Client ID de Micr
 Panel personal de tareas, en modo oscuro y muy visual, que centraliza en un solo sitio:
 
 - **Personal**: tareas de Todoist (plan gratuito).
-- **Trabajo**: tareas de Microsoft Planner (plan personal del usuario en el tenant del trabajo). *Pendiente.*
+- **Trabajo**: tareas de Microsoft Planner (el plan "Tareas mías" del usuario en el tenant del trabajo).
 - **Calendario**: citas de Google Calendar. *Pendiente.*
 
 Encima de las tareas de origen, la app añade su propia capa: **etiquetas con nombre y color**, filtros y una vista de tablero cómoda. Se usa desde el PC del trabajo, el PC de casa y un iPad, siempre por navegador.
@@ -46,6 +46,7 @@ Encima de las tareas de origen, la app añade su propia capa: **etiquetas con no
 | `mp.datos` | Almacén de datos propios de la app (ver abajo) |
 | `mp.datos.base` | Última versión sincronizada con OneDrive (base de la fusión) |
 | `mp.onedrive` | `{ clientId, account, etag, syncedAt }` |
+| `mp.planner` | `{ account, plans, planId, buckets, tasks, cats: { [planId]: {etag, names} }, syncedAt }` (copia de Planner) |
 | `mp.google` | `{ clientId, account, token, exp, syncedAt }` (token de acceso de Google, dura una hora) |
 | `msal.*` | Caché de sesión de MSAL (la gestiona la librería) |
 | `mp.ui` | Preferencias de interfaz (`sidebarHidden`, `projectId`) |
@@ -62,6 +63,15 @@ Encima de las tareas de origen, la app añade su propia capa: **etiquetas con no
 - **Login por redirección, sin ventana emergente:** la página de login de Microsoft aísla su ventana de la que la abre y el sondeo de MSAL 4 deja de funcionar (da `interaction_in_progress` en el siguiente intento). Se usa `loginRedirect` (Conectar, Reconectar, Sincronizar con la sesión caducada, o el botón del aviso) con `prompt: 'select_account'`; al volver, `handleRedirectPromise()` en `loadMsal()` lo procesa. Antes de cada login se borra la marca `msal.interaction.status` que deje un intento anterior. URI de redirección: la propia página (`https://aivanjoe.github.io/tareas/` y `http://localhost:8000/`).
 - **Estado:** en la barra lateral, bajo Todoist, aparece OneDrive con la hora o "cambios sin subir", "reconectar" o "con error". En Ajustes, sección OneDrive: Client ID, Conectar, cuenta, Sincronizar ahora y Desconectar (desconectar no borra datos).
 - **Pruebas:** sin cuenta real, se prueba en local con MSAL y Graph simulados (dos "dispositivos" contra el mismo OneDrive simulado, con conflictos de eTag).
+
+## Trabajo: Microsoft Planner (hecho)
+
+- **Misma App Registration y misma MSAL que OneDrive**, con la cuenta del trabajo: `loginRedirect` con autoridad `organizations`, `state: 'planner'` y permisos `Tasks.ReadWrite` y `User.Read` (en Entra: permiso delegado `Tasks.ReadWrite` con consentimiento de administrador). En la caché de MSAL conviven las dos cuentas: la personal es la del directorio de cuentas de Microsoft (`tenantId` `9188040d-…`, `consumers`); la otra es la del trabajo. Al volver del login, `handleRedirectPromise` decide por `state` y por el directorio a qué conexión corresponde. Token en silencio con la autoridad del directorio de la cuenta.
+- **Lectura (al sincronizar):** `/me/planner/plans` (se elige por defecto el plan "Tareas mías"; selector de plan en la cabecera), `/planner/plans/{id}/buckets` (columnas, por `orderHint` ascendente), `/planner/plans/{id}/tasks` (sin las completadas; por `orderHint` ascendente) y `/planner/plans/{id}/details` (nombres de las etiquetas).
+- **Escritura** con el `etag` de cada objeto (`If-Match`; en PATCH, `Prefer: return=representation` para recibir el etag nuevo): mover de columna y reordenar (`bucketId` + `orderHint` con el formato de Planner `"<anterior> <siguiente>!"`), crear (al final de la columna), renombrar, completar (`percentComplete: 100`, con deshacer a 0), etiquetas de la tarea (`appliedCategories` con `true`/`false`), **notas** (`/planner/tasks/{id}/details` → `description`; se leen al abrir el panel y se guardan con Guardar) y nombres de las etiquetas del plan (`categoryDescriptions`). Si Planner responde 412 (cambiado entretanto) se avisa y se vuelve a leer.
+- **Etiquetas de Trabajo = etiquetas de Planner** (bidireccional): las 25 de Planner (`category1`…`category25`, colores fijos aproximados en `PL_COLORS`); en la bandeja salen las que tienen nombre o están puestas en alguna tarea; "Gestionar" edita sus nombres. Personal sigue con las etiquetas de la app.
+- Tarjetas como las de Personal, sin fechas; icono de bocadillo si la tarea tiene notas (`hasDescription`). Planner no tiene comentarios accesibles: solo notas.
+- La sesión del trabajo (SPA) dura ~24 h: al caducar, el lateral muestra "reconectar" y Sincronizar lleva al login.
 
 ## Google: contactos (hecho, lectura y escritura)
 
@@ -91,7 +101,7 @@ Encima de las tareas de origen, la app añade su propia capa: **etiquetas con no
 - **Las columnas son de solo lectura en la app.** Crear, renombrar, reordenar o borrar columnas se hace en el origen.
 - **Mover tarjetas entre columnas es crucial** y sí se escribe en el origen.
 - **Tarjetas compactas:** casilla de completar + nombre en una línea (con elipsis). Si tiene etiquetas, van en una segunda fila, en pequeño. Borde lateral del color de la primera etiqueta.
-- **Etiquetas:** gestor propio (nombre + color, sin iconos, ordenables). Varias por tarea. Son solo de la app, no se escriben en Todoist. Se comparten entre las tres pantallas.
+- **Etiquetas de Personal:** gestor propio (nombre + color, sin iconos, ordenables), en Ajustes y en la bandeja. Varias por tarea. Son solo de la app, no se escriben en Todoist. **Trabajo usa las etiquetas de Planner** (ver arriba), no estas.
 - **Asignar etiqueta:** arrastrándola desde la bandeja superior hasta la tarjeta. Pulsar una etiqueta de la bandeja filtra el tablero.
 - **Quitar etiquetas:** desde el panel de la tarea, no arrastrando.
 - **Añadir/editar tarea:** panel sencillo con nombre y etiquetas. "Añadir tarea" al pie de cada columna crea en esa columna; el botón de la cabecera permite elegir columna.
@@ -147,6 +157,5 @@ La App Registration ya existe (tipo SPA, cuentas de cualquier organización y pe
 
 1. **Bloques traídos de un portal anterior del usuario** (hechos: Cumpledías, en la pantalla Contactos; Gastos y pagos; y Consumos) (web con servidor propio), rehechos con el estilo y la arquitectura de esta app. Cada uno es una colección del almacén y una pantalla en la barra lateral. Los datos reales se importan con un fichero generado fuera del repo; nunca se suben aquí.
    - **Inversiones:** precios y gráficas de mercado. BTC y ETH con datos públicos de Binance; SPY necesita un proveedor que admita llamadas desde el navegador, con clave gratuita introducida en Ajustes.
-2. **Trabajo: Microsoft Planner.** Misma App Registration. Login contra el tenant del trabajo (el Tenant ID lo introduce el usuario en Ajustes). Permiso delegado `Tasks.ReadWrite`. Mismo tablero y mismas etiquetas que Personal, con los buckets como columnas. El login solo se pide al sincronizar.
-3. **Calendario: Google Calendar.** Pantalla propia con vista de calendario (por definir). Mismo proyecto de Google y mismo login por redirección que los contactos, añadiendo el permiso de Calendar.
-4. Más adelante: elementos propios de la app (pagos recurrentes, cumpleaños, recordatorios) y captura rápida de tareas.
+2. **Calendario: Google Calendar.** Pantalla propia con vista de calendario (por definir). Mismo proyecto de Google y mismo login por redirección que los contactos, añadiendo el permiso de Calendar.
+3. Más adelante: elementos propios de la app (pagos recurrentes, cumpleaños, recordatorios) y captura rápida de tareas.
