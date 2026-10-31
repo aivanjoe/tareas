@@ -314,11 +314,12 @@
   }
 
   // Excepción a la sincronización manual (decisión del usuario), solo para la Auditoría:
-  // - lo que registra este dispositivo se sube solo a OneDrive 1 minuto después del último registro
-  //   (una sola subida para varios seguidos; sin reintentos si OneDrive falla) y al salir de la app;
+  // - cada registro (cambio, sincronización, conexión…) se envía a OneDrive al momento: segundo y medio
+  //   después, para juntar los que llegan de golpe. Sin registros no se envía nada; si OneDrive está en
+  //   error o con la sesión caducada no se intenta (así un error no provoca otro intento y otro registro);
   // - con la pantalla Auditoría abierta y visible, cada 2 minutos se lee y sube el fichero de OneDrive.
   // Solo OneDrive: Todoist, Planner y Google no se tocan.
-  const AUD_SUBIDA_MS = 60000, AUD_REFRESCO_MS = 120000;
+  const AUD_SUBIDA_MS = 1500, AUD_REFRESCO_MS = 120000;
   let audSubidaTimer = null, audRefresco = null, audUltimaLectura = 0;
   const audPendiente = () => {
     if (!S.odBase) return Object.keys(S.datos.colecciones.auditoria || {}).length > 0;
@@ -328,7 +329,11 @@
   function audProgramarSubida() {
     if (!odUsable()) return;
     clearTimeout(audSubidaTimer);
-    audSubidaTimer = setTimeout(() => { if (odUsable() && S.odState !== 'syncing' && audPendiente()) syncDatos(); }, AUD_SUBIDA_MS);
+    audSubidaTimer = setTimeout(() => {
+      if (!odUsable() || !audPendiente()) return;
+      if (S.odState === 'syncing') { audProgramarSubida(); return; } // en cuanto termine la que está en marcha
+      syncDatos();
+    }, AUD_SUBIDA_MS);
   }
   async function audActualizar(opts = {}) {
     if (!odConnected() || S.odState === 'syncing' || S.odState === 'login') return;
