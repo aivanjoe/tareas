@@ -205,6 +205,11 @@ Oscuro y elegante. Tipografía Manrope (Google Fonts) con alternativas del siste
 - Mensajes de commit en español, breves y descriptivos.
 - Respuestas en español, directas y prácticas.
 
+## Versiones
+
+- **v1.0** (etiqueta git `v1.0`, 31 oct 2026; anti-caché `?v=49`): primera versión estable y completa, elegida por el usuario. Incluye Personal, Trabajo, Compra (con Alexa vía Homey), Calendario (mes y semana), Contactos y Cumples con santoral, Gastos, Consumos, Auditoría y OneDrive.
+- Cuando el usuario dé por buena otra versión: etiqueta anotada `vX.Y` sobre el commit de `main` (`git tag -a vX.Y -m "…"` y `git push origin vX.Y`) y una línea aquí. La versión de la app (etiqueta) y el número anti-caché `?v=N` son cosas distintas: el segundo sube en cada cambio.
+
 ## Próximas fases
 
 La App Registration ya existe (tipo SPA, cuentas de cualquier organización y personales, registrada por el usuario en el tenant del trabajo); su Client ID se introduce en Ajustes.
