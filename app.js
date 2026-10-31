@@ -283,13 +283,20 @@
     const out = [];
     for (const n of new Set([...Object.keys(prev), ...Object.keys(now)])) {
       const a = prev[n] || {}, b = now[n] || {};
+      const cuenta = { alta: 0, cambio: 0, baja: 0 }; // trayectos del coche: se resumen («N trayectos añadidos»)
       for (const id of new Set([...Object.keys(a), ...Object.keys(b)])) {
         if (a[id] === b[id]) continue;
         const kind = a[id] === undefined ? 'alta' : b[id] === undefined ? 'baja' : 'cambio';
+        if (n === 'trayectos') { cuenta[kind]++; continue; }
         let rec = {};
         try { rec = JSON.parse(b[id] || a[id]) || {}; } catch (e) { /* registro raro */ }
         const t = describeRegistro(n, id, kind, rec);
         if (t) out.push(t);
+      }
+      if (n === 'trayectos') {
+        if (cuenta.alta) out.push(plural(cuenta.alta, 'trayecto del coche añadido', 'trayectos del coche añadidos'));
+        if (cuenta.cambio) out.push(plural(cuenta.cambio, 'trayecto del coche modificado', 'trayectos del coche modificados'));
+        if (cuenta.baja) out.push(plural(cuenta.baja, 'trayecto del coche borrado', 'trayectos del coche borrados'));
       }
     }
     return out;
@@ -2865,7 +2872,7 @@
     calendario: { title: 'Calendario', eyebrow: () => calCfg() ? calCfg().nombre : 'Google Calendar', add: 'Nuevo evento', el: 'viewCalendario', render: () => renderCal(), onAdd: () => openCalEvent(null) },
     contactos: { title: 'Contactos', eyebrow: 'Agenda y cumples', add: () => ctTab() === 'agenda' ? 'Nuevo contacto' : 'Elegir contactos', el: 'viewContactos', render: () => renderCumpledias(), onAdd: () => ctTab() === 'agenda' ? openEditContacto(null) : openCdPicker() },
     gastos: { title: 'Gastos', eyebrow: 'Pagos recurrentes', add: 'Nuevo gasto', el: 'viewGastos', render: () => renderGastos(), onAdd: () => openGasto(null) },
-    consumos: { title: 'Consumos', eyebrow: 'Luz, gas y agua', add: 'Subir facturas', el: 'viewConsumos', render: () => renderConsumos(), onAdd: () => pickFacturas() },
+    consumos: { title: 'Consumos', eyebrow: 'Luz, gas, agua y coche', add: () => cTipo === 'coche' ? 'Importar trayectos' : 'Subir facturas', el: 'viewConsumos', render: () => renderConsumos(), onAdd: () => cTipo === 'coche' ? pickTrayectos() : pickFacturas() },
     auditoria: { title: 'Auditoría', eyebrow: 'Historial de cambios', add: 'Exportar CSV', addIcon: 'file', el: 'viewAuditoria', render: () => renderAuditoria(), onAdd: () => exportarAuditoria() }
   };
 
@@ -4651,6 +4658,269 @@
     return { next, gap, prevYear, avg, n: last3.length, value };
   }
 
+  // ---- coche: trayectos exportados de MyPeugeot (CSV) ----
+  // Colección "trayectos": un registro por trayecto, id "AAAA-MM-DD-HHMM" (fecha y hora de salida; el CSV
+  // no trae identificador). Reimportar periodos que se solapan no duplica nada.
+  const COCHE = { nombre: 'Coche', color: '#F29E4C' };
+  let kMetric = 'coste'; // coste | km | l100
+  let kAbiertos = null;  // meses desplegados en el historial ("AAAA-MM"); null: el más reciente
+  const trayectos = () => Object.values(S.datos.colecciones.trayectos || {});
+  const fmtKm = n => (Math.round((n || 0) * 10) / 10).toLocaleString('es-ES') + '\u00a0km';
+  const fmtL100 = (l, km) => km > 0 && l > 0 ? (Math.round(l / km * 1000) / 10).toLocaleString('es-ES', { minimumFractionDigits: 1 }) + '\u00a0l/100\u00a0km' : null;
+  const fmtMin = m => m === null || m === undefined ? '' : m < 60 ? m + ' min' : Math.floor(m / 60) + ' h ' + String(m % 60).padStart(2, '0') + ' min';
+
+  // Número con punto o coma decimal ("6.9", "6,9", "1.234,5")
+  function numFlex(v) {
+    let t = String(v || '').trim().replace(/\s|€/g, '');
+    if (!t) return null;
+    if (t.includes(',') && t.includes('.')) t = t.replace(/\./g, '').replace(',', '.');
+    else t = t.replace(',', '.');
+    return /^-?\d+(\.\d+)?$/.test(t) ? parseFloat(t) : null;
+  }
+  // Línea de CSV con comillas ("a;b" cuenta como un campo)
+  function csvLine(line, sep) {
+    const out = [];
+    let cur = '', q = false;
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i];
+      if (q) {
+        if (ch === '"' && line[i + 1] === '"') { cur += '"'; i++; }
+        else if (ch === '"') q = false;
+        else cur += ch;
+      } else if (ch === '"') q = true;
+      else if (ch === sep) { out.push(cur); cur = ''; }
+      else cur += ch;
+    }
+    out.push(cur);
+    return out.map(x => x.trim());
+  }
+  const normCab = s => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/\s+/g, ' ').trim();
+  const horaHm = v => { const m = /^(\d{1,2}):(\d{2})/.exec(String(v || '').trim()); return m && +m[1] < 24 && +m[2] < 60 ? m[1].padStart(2, '0') + ':' + m[2] : null; };
+  function fechaYmd(v) {
+    const t = String(v || '').trim();
+    let m = /^(\d{1,2})[/.-](\d{1,2})[/.-](\d{4})$/.exec(t);
+    const ymd = m ? m[3] + '-' + m[2].padStart(2, '0') + '-' + m[1].padStart(2, '0') : (/^\d{4}-\d{2}-\d{2}/.exec(t) || [''])[0];
+    return isYmd(ymd) ? ymd : null;
+  }
+  function coords(v) {
+    const m = /(-?\d{1,3}(?:\.\d+)?)\s*[,;]\s*(-?\d{1,3}(?:\.\d+)?)/.exec(String(v || ''));
+    return m ? [Math.round(+m[1] * 1e5) / 1e5, Math.round(+m[2] * 1e5) / 1e5] : null;
+  }
+
+  // Lee el CSV de MyPeugeot. Las columnas se buscan por su nombre, no por su posición.
+  function parseTrayectos(text) {
+    const lines = text.replace(/^﻿/, '').split(/\r?\n/).filter(l => l.trim());
+    const hi = lines.findIndex(l => { const n = normCab(l); return n.includes('fecha') && n.includes('distancia'); });
+    if (hi < 0) throw new Error('no parece un fichero de trayectos de MyPeugeot');
+    const head = lines[hi];
+    const sep = head.includes('\t') ? '\t' : head.split(';').length > 2 ? ';' : ',';
+    const cab = csvLine(head, sep).map(normCab);
+    const col = (...claves) => cab.findIndex(c => claves.some(k => c.startsWith(k)));
+    const ix = {
+      fecha: col('fecha'), salida: col('hora de salida'), llegada: col('hora de llegada'), dur: col('duracion'),
+      origen: col('direccion de origen', 'origen'), destino: col('direccion de destino', 'destino'),
+      km: col('distancia'), consumo: col('consumo'), precio: col('precio'), coste: col('coste')
+    };
+    if (ix.fecha < 0 || ix.salida < 0 || ix.km < 0) throw new Error('faltan la fecha, la hora de salida o la distancia');
+    const out = [];
+    for (const line of lines.slice(hi + 1)) {
+      const f = csvLine(line, sep);
+      const val = k => ix[k] >= 0 ? f[ix[k]] : '';
+      const fecha = fechaYmd(val('fecha')), salida = horaHm(val('salida')), km = numFlex(val('km'));
+      if (!fecha || !salida || km === null) continue;
+      const llegada = horaHm(val('llegada'));
+      let min = null;
+      const d = /^(\d+):(\d{2})/.exec(val('dur'));
+      if (d) min = +d[1] * 60 + +d[2];
+      else if (llegada) { const a = +salida.slice(0, 2) * 60 + +salida.slice(3), b = +llegada.slice(0, 2) * 60 + +llegada.slice(3); min = (b - a + 1440) % 1440; }
+      const consumo = numFlex(val('consumo')), precio = numFlex(val('precio'));
+      let coste = numFlex(val('coste'));
+      const litros = consumo !== null ? Math.round(km * consumo / 100 * 1000) / 1000 : null;
+      if (coste === null && litros !== null && precio !== null) coste = Math.round(litros * precio * 100) / 100;
+      out.push({ id: fecha + '-' + salida.replace(':', ''), fecha, salida, llegada, min, km, consumo, litros, precio, coste,
+        origen: coords(val('origen')), destino: coords(val('destino')) });
+    }
+    return out;
+  }
+  // Texto del fichero: UTF-8 y, si no lo es, Windows-1252
+  async function leerTexto(file) {
+    const buf = await file.arrayBuffer();
+    try { return new TextDecoder('utf-8', { fatal: true }).decode(buf); }
+    catch (e) { return new TextDecoder('windows-1252').decode(buf); }
+  }
+
+  function pickTrayectos() {
+    const input = h('input', { type: 'file', accept: '.csv,text/csv,text/plain', multiple: true, hidden: true });
+    input.addEventListener('change', () => { const fs = [...input.files]; input.remove(); if (fs.length) importTrayectos(fs); });
+    document.body.append(input);
+    input.click();
+  }
+  async function importTrayectos(files) {
+    const cols = Object.assign({}, S.datos.colecciones.trayectos);
+    let nuevos = 0, cambiados = 0, iguales = 0;
+    const fallos = [];
+    for (const file of files) {
+      try {
+        if (file.size > 10 * 1024 * 1024) throw new Error('ocupa más de 10 MB');
+        const lista = parseTrayectos(await leerTexto(file));
+        if (!lista.length) throw new Error('no trae trayectos');
+        for (const t of lista) {
+          const prev = cols[t.id];
+          if (!prev) nuevos++;
+          else if (JSON.stringify(prev) === JSON.stringify(t)) { iguales++; continue; }
+          else cambiados++;
+          cols[t.id] = t;
+        }
+      } catch (e) {
+        fallos.push(file.name + ' (' + (e.message || 'error') + ')');
+      }
+    }
+    if (nuevos || cambiados) {
+      S.datos.colecciones.trayectos = cols;
+      saveDatos();
+    }
+    cTipo = 'coche';
+    kAbiertos = null;
+    if (S.ui.view === 'consumos') applyView();
+    const partes = [];
+    if (nuevos) partes.push(plural(nuevos, 'trayecto nuevo', 'trayectos nuevos'));
+    if (cambiados) partes.push(plural(cambiados, 'actualizado', 'actualizados'));
+    if (iguales) partes.push(iguales + ' ya estaban');
+    if (partes.length) toast(cap(partes.join(', ')) + '.');
+    if (fallos.length) toast('No se pudieron leer: ' + fallos.slice(0, 3).join(', ') + (fallos.length > 3 ? ' y ' + (fallos.length - 3) + ' más' : '') + '.', 'error', null, 10000);
+  }
+
+  // Suma de una lista de trayectos (el consumo medio sale de litros entre km, solo de los que tienen consumo)
+  function sumaTray(list) {
+    const r = { n: list.length, km: 0, coste: 0, litros: 0, kmL: 0 };
+    for (const t of list) {
+      r.km += t.km || 0;
+      r.coste += t.coste || 0;
+      if (t.litros !== null && t.litros !== undefined) { r.litros += t.litros; r.kmL += t.km || 0; }
+    }
+    return r;
+  }
+
+  function renderCoche(root, cards) {
+    const all = trayectos();
+    const hoy = new Date(todayUtc());
+    const y = hoy.getUTCFullYear(), mHoy = hoy.getUTCMonth() + 1;
+    const mesKey = t => t.fecha.slice(0, 7);
+    const deMes = (yr, m) => all.filter(t => +t.fecha.slice(0, 4) === yr && +t.fecha.slice(5, 7) === m);
+
+    // Resumen: este mes y lo que va de año
+    const bloque = (label, list) => {
+      const s = sumaTray(list);
+      const partes = s.n ? [fmtKm(s.km), plural(s.n, 'trayecto'), fmtL100(s.litros, s.kmL), s.litros ? (Math.round(s.litros * 10) / 10).toLocaleString('es-ES') + ' l' : null].filter(Boolean) : ['sin trayectos'];
+      return h('div', { class: 'est-main' },
+        h('span', { class: 'stat-label' }, label),
+        h('span', { class: 'est-value' }, fmtEur(s.coste)),
+        h('span', { class: 'stat-sub' }, partes.join(' · ')));
+    };
+    const resumen = all.length ? h('section', { class: 'panel estimate car-sum' },
+      bloque(cap(MESES_LARGOS[mHoy - 1]) + ' ' + y, deMes(y, mHoy)),
+      bloque('Año ' + y, all.filter(t => +t.fecha.slice(0, 4) === y))) : null;
+
+    // Gráfico: este año frente al anterior, por mes
+    const serie = yr => Array.from({ length: 12 }, (_, m) => {
+      const list = deMes(yr, m + 1);
+      if (!list.length) return null;
+      const s = sumaTray(list);
+      if (kMetric === 'l100') return s.kmL > 0 && s.litros > 0 ? Math.round(s.litros / s.kmL * 1000) / 10 : null;
+      return Math.round((kMetric === 'km' ? s.km : s.coste) * 100) / 100;
+    });
+    const cur = serie(y), prev = serie(y - 1);
+    const hasData = cur.some(v => v !== null) || prev.some(v => v !== null);
+    const metricSeg = h('div', { class: 'seg', role: 'group', 'aria-label': 'Ver' },
+      [['coste', 'Coste'], ['km', 'Km'], ['l100', 'L/100 km']].map(([k, label]) => h('button', { type: 'button', class: kMetric === k ? 'on' : '', 'aria-pressed': kMetric === k ? 'true' : 'false', onclick: () => { kMetric = k; renderConsumos(); } }, label)));
+    const canvas = h('canvas', { 'aria-label': 'Gráfico del coche: ' + y + ' frente a ' + (y - 1) });
+    const chartPanel = h('section', { class: 'panel' },
+      h('div', { class: 'panel-head' }, h('h2', null, 'Coche · ' + (y - 1) + ' y ' + y),
+        h('div', { class: 'legend' }, h('span', { class: 'lg prev' }, String(y - 1)), h('span', { class: 'lg cur', style: '--c:' + COCHE.color }, String(y))),
+        metricSeg),
+      hasData ? h('div', { class: 'chart-box' }, canvas) : h('p', { class: 'muted empty-note' }, 'No hay trayectos de estos dos años.'));
+
+    // Historial por meses, desplegables
+    const meses = [...new Set(all.map(mesKey))].sort().reverse();
+    if (!kAbiertos) kAbiertos = new Set(meses.slice(0, 1));
+    const rows = h('div', { class: 'ev-list' });
+    const borrar = ids => {
+      const rest = Object.assign({}, S.datos.colecciones.trayectos);
+      for (const id of ids) delete rest[id];
+      S.datos.colecciones.trayectos = rest;
+      saveDatos();
+      renderConsumos();
+    };
+    for (const mk of meses) {
+      const list = all.filter(t => mesKey(t) === mk).sort((a, b) => b.id.localeCompare(a.id));
+      const s = sumaTray(list);
+      const abierto = kAbiertos.has(mk);
+      const nombre = cap(MESES_LARGOS[+mk.slice(5, 7) - 1]) + ' ' + mk.slice(0, 4);
+      const toggle = () => { if (abierto) kAbiertos.delete(mk); else kAbiertos.add(mk); renderConsumos(); };
+      rows.append(h('div', { class: 'ev consumo car-mes' + (abierto ? ' open' : '') },
+        h('button', { type: 'button', class: 'ev-main as-btn', 'aria-expanded': abierto ? 'true' : 'false', onclick: toggle },
+          h('span', { class: 'ev-name' }, nombre),
+          h('span', { class: 'ev-what' }, [plural(s.n, 'trayecto'), fmtKm(s.km), fmtL100(s.litros, s.kmL)].filter(Boolean).join(' · '))),
+        h('span', { class: 'ev-amount' }, fmtEur(s.coste)),
+        h('div', { class: 'row-tools' },
+          h('button', { type: 'button', class: 'icon-btn mini car-chev', 'aria-label': abierto ? 'Ocultar trayectos' : 'Ver trayectos', title: abierto ? 'Ocultar trayectos' : 'Ver trayectos', onclick: toggle }, ICON.right()),
+          h('button', { type: 'button', class: 'icon-btn mini', 'aria-label': 'Borrar el mes', title: 'Borrar el mes',
+            onclick: () => { if (confirm('¿Borrar los ' + plural(s.n, 'trayecto') + ' de ' + nombre.toLowerCase() + '? Puedes volver a importarlos.')) borrar(list.map(t => t.id)); } }, ICON.trash()))));
+      if (!abierto) continue;
+      const sub = h('div', { class: 'car-trips' });
+      for (const t of list) {
+        const dia = new Date(utcDay(t.fecha)).toLocaleDateString('es-ES', { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'UTC' });
+        sub.append(h('div', { class: 'ev consumo car-trip' },
+          h('div', { class: 'ev-main' },
+            h('span', { class: 'ev-name' }, cap(dia) + ' · ' + t.salida + (t.llegada ? ' → ' + t.llegada : '')),
+            h('span', { class: 'ev-what' }, [fmtMin(t.min), fmtKm(t.km), t.consumo !== null && t.consumo !== undefined ? t.consumo.toLocaleString('es-ES') + '\u00a0l/100\u00a0km' : null].filter(Boolean).join(' · '))),
+          h('span', { class: 'ev-amount' }, t.coste !== null && t.coste !== undefined ? fmtEur(t.coste) : '—'),
+          h('div', { class: 'row-tools' },
+            h('button', { type: 'button', class: 'icon-btn mini', 'aria-label': 'Borrar trayecto', title: 'Borrar trayecto',
+              onclick: () => { if (confirm('¿Borrar el trayecto del ' + dia + ' a las ' + t.salida + '?')) borrar([t.id]); } }, ICON.trash()))));
+      }
+      rows.append(sub);
+    }
+    if (!meses.length) rows.append(h('p', { class: 'muted empty-note' },
+      'En la app MyPeugeot: Conducción → Gestionar tus trayectos → los tres puntos de arriba → Exportar, en CSV. Guárdalo en Archivos o en OneDrive y pulsa Importar trayectos.'));
+
+    const toolbar = h('div', { class: 'g-toolbar' }, h('span'),
+      h('div', { class: 'row-actions' },
+        h('button', { type: 'button', class: 'btn ghost small', onclick: pickTrayectos }, ICON.file(), 'Importar trayectos')));
+
+    root.replaceChildren(...[cards, resumen, chartPanel,
+      h('section', { class: 'panel' }, h('div', { class: 'panel-head' }, h('h2', null, 'Historial · Coche'), toolbar), rows)].filter(Boolean));
+
+    if (chartObj) { chartObj.destroy(); chartObj = null; }
+    if (hasData) {
+      const fmt = v => kMetric === 'coste' ? fmtEur(v) : kMetric === 'km' ? fmtKm(v) : v.toLocaleString('es-ES') + ' l/100 km';
+      drawBars(canvas, prev, cur, y, COCHE.color, fmt, v => kMetric === 'coste' ? v + ' €' : v);
+    }
+  }
+
+  // Barras por mes: año anterior en gris y este año en el color del tipo
+  function drawBars(canvas, prev, cur, y, color, fmt, tick) {
+    loadChart().then(() => {
+      if (!canvas.isConnected) return;
+      chartObj = new Chart(canvas, {
+        type: 'bar',
+        data: { labels: MESES_CORTOS, datasets: [
+          { label: String(y - 1), data: prev, backgroundColor: 'rgba(154, 164, 181, 0.32)', borderRadius: 4 },
+          { label: String(y), data: cur, backgroundColor: color, borderRadius: 4 }
+        ] },
+        options: {
+          responsive: true, maintainAspectRatio: false, animation: false,
+          interaction: { mode: 'index', intersect: false },
+          plugins: { legend: { display: false }, tooltip: { callbacks: { label: ctx => ctx.dataset.label + ': ' + (ctx.raw === null ? '—' : fmt(ctx.raw)) } } },
+          scales: {
+            x: { ticks: { color: '#8A94A6', font: { family: 'Manrope', size: 11 } }, grid: { display: false }, border: { display: false } },
+            y: { beginAtZero: true, ticks: { color: '#8A94A6', font: { family: 'Manrope', size: 11 }, maxTicksLimit: 5, callback: tick }, grid: { color: 'rgba(255, 255, 255, 0.06)' }, border: { display: false } }
+          }
+        }
+      });
+    }).catch(e => toast(e.message, 'error'));
+  }
+
   function renderConsumos() {
     const root = document.getElementById('viewConsumos');
     root.dataset.day = String(todayUtc());
@@ -4658,13 +4928,22 @@
     const byTipo = t => all.filter(c => c.tipo === t);
     const latest = t => byTipo(t).filter(c => isYmd(c.fin)).sort((a, b) => b.fin.localeCompare(a.fin))[0] || null;
 
-    const cards = h('div', { class: 'stats three picks' }, Object.entries(TIPOS).map(([k, T]) => {
+    const pick = (k, color, nombre, valor, sub) => h('button', { type: 'button', class: 'stat tipo-pick' + (cTipo === k ? ' on' : ''), style: '--c:' + color, 'aria-pressed': cTipo === k ? 'true' : 'false',
+      onclick: () => { cTipo = k; applyView(); } },
+      h('span', { class: 'stat-label' }, nombre),
+      h('span', { class: 'stat-value' }, valor),
+      h('span', { class: 'stat-sub' }, sub));
+    const cards = h('div', { class: 'stats picks' }, Object.entries(TIPOS).map(([k, T]) => {
       const l = latest(k);
-      return h('button', { type: 'button', class: 'stat tipo-pick' + (cTipo === k ? ' on' : ''), style: '--c:' + T.color, 'aria-pressed': cTipo === k ? 'true' : 'false', onclick: () => { cTipo = k; renderConsumos(); } },
-        h('span', { class: 'stat-label' }, T.nombre),
-        h('span', { class: 'stat-value' }, l && l.coste !== null ? fmtEur(l.coste) : '—'),
-        h('span', { class: 'stat-sub' }, l ? MESES_CORTOS[l.mes - 1].toLowerCase() + ' ' + l.anio : 'sin datos'));
+      return pick(k, T.color, T.nombre, l && l.coste !== null ? fmtEur(l.coste) : '—', l ? MESES_CORTOS[l.mes - 1].toLowerCase() + ' ' + l.anio : 'sin datos');
     }));
+    // Coche: el último mes con trayectos
+    const tray = trayectos();
+    const ultMes = tray.reduce((m, t) => t.fecha.slice(0, 7) > m ? t.fecha.slice(0, 7) : m, '');
+    const sMes = ultMes ? sumaTray(tray.filter(t => t.fecha.startsWith(ultMes))) : null;
+    cards.append(pick('coche', COCHE.color, COCHE.nombre, sMes ? fmtEur(sMes.coste) : '—',
+      sMes ? MESES_CORTOS[+ultMes.slice(5, 7) - 1].toLowerCase() + ' ' + ultMes.slice(0, 4) + ' · ' + fmtKm(sMes.km) : 'sin datos'));
+    if (cTipo === 'coche') return renderCoche(root, cards);
 
     const T = TIPOS[cTipo];
     const list = byTipo(cTipo);
@@ -4739,33 +5018,14 @@
 
     if (chartObj) { chartObj.destroy(); chartObj = null; }
     if (hasData) {
-      loadChart().then(() => {
-        if (!canvas.isConnected) return;
-        const unit = cMetric === 'coste' ? '€' : T.unidad;
-        const fmt = v => cMetric === 'coste' ? fmtEur(v) : fmtCant(v, unit);
-        chartObj = new Chart(canvas, {
-          type: 'bar',
-          data: { labels: MESES_CORTOS, datasets: [
-            { label: String(y - 1), data: prev, backgroundColor: 'rgba(154, 164, 181, 0.32)', borderRadius: 4 },
-            { label: String(y), data: cur, backgroundColor: T.color, borderRadius: 4 }
-          ] },
-          options: {
-            responsive: true, maintainAspectRatio: false, animation: false,
-            interaction: { mode: 'index', intersect: false },
-            plugins: { legend: { display: false }, tooltip: { callbacks: { label: ctx => ctx.dataset.label + ': ' + (ctx.raw === null ? '—' : fmt(ctx.raw)) } } },
-            scales: {
-              x: { ticks: { color: '#8A94A6', font: { family: 'Manrope', size: 11 } }, grid: { display: false }, border: { display: false } },
-              y: { beginAtZero: true, ticks: { color: '#8A94A6', font: { family: 'Manrope', size: 11 }, maxTicksLimit: 5, callback: v => cMetric === 'coste' ? v + ' €' : v }, grid: { color: 'rgba(255, 255, 255, 0.06)' }, border: { display: false } }
-            }
-          }
-        });
-      }).catch(e => toast(e.message, 'error'));
+      const unit = cMetric === 'coste' ? '€' : T.unidad;
+      drawBars(canvas, prev, cur, y, T.color, v => cMetric === 'coste' ? fmtEur(v) : fmtCant(v, unit), v => cMetric === 'coste' ? v + ' €' : v);
     }
   }
 
   function openConsumo(id) {
     const cur = id ? (S.datos.colecciones.consumos || {})[id] : null;
-    const st = { tipo: cur ? cur.tipo : cTipo };
+    const st = { tipo: cur ? cur.tipo : TIPOS[cTipo] ? cTipo : 'luz' };
     const inp = (idAttr, attrs) => h('input', Object.assign({ class: 'input', id: idAttr, autocomplete: 'off' }, attrs));
     const fin = inp('cFin', { type: 'date', value: cur && isYmd(cur.fin) ? cur.fin : '' });
     const inicio = inp('cInicio', { type: 'date', value: cur && isYmd(cur.inicio) ? cur.inicio : '' });

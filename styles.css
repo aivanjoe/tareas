@@ -477,9 +477,17 @@ a.btn { text-decoration: none; }
 .chart-box { position: relative; height: 240px; }
 .ev.consumo { grid-template-columns: minmax(0, 1fr) auto auto; }
 .row-tools { display: flex; gap: 2px; }
+/* Coche: historial por meses desplegables */
+.car-mes .as-btn { color: inherit; font: inherit; }
+.car-chev svg { transition: transform 0.15s; }
+.car-mes.open .car-chev svg { transform: rotate(90deg); }
+.car-trips { display: flex; flex-direction: column; gap: 4px; margin: -2px 0 6px 14px; padding-left: 10px; border-left: 2px solid color-mix(in srgb, #F29E4C 45%, transparent); }
+.car-trip { padding: 7px 10px; background: transparent; }
+.car-trip .ev-name { font-size: 13px; font-weight: 600; color: var(--text2); }
+.car-sum .est-main { flex: 1 1 220px; }
 @media (max-width: 700px) {
-  .stats.three.picks { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
-  .stats.three .stat.tipo-pick { padding: 12px; }
+  .stats.picks { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .stats.picks .stat.tipo-pick { padding: 12px; }
   .stat.tipo-pick .stat-value { font-size: 17px; }
   .stat.tipo-pick .stat-sub { white-space: normal; font-size: 11.5px; }
   .legend { margin-left: 0; }
