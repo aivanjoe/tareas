@@ -4662,8 +4662,8 @@
   // ---- coche: trayectos exportados de MyPeugeot (CSV) ----
   // Colección "trayectos": un registro por trayecto, id "AAAA-MM-DD-HHMM" (fecha y hora de salida; el CSV
   // no trae identificador). Reimportar periodos que se solapan no duplica nada.
-  const COCHE = { nombre: 'Coche', color: '#F29E4C' };
-  let kMetric = 'gasolina'; // gasolina | coste | km | l100
+  const COCHE = { nombre: 'Coche', color: '#B79CF0' };
+  let kMetric = 'gasto'; // gasto | repostado | km | l100
   let kAbiertos = null;  // meses desplegados en el historial ("AAAA-MM"); null: el más reciente
   const trayectos = () => Object.values(S.datos.colecciones.trayectos || {});
   const fmtKm = n => (Math.round((n || 0) * 10) / 10).toLocaleString('es-ES') + '\u00a0km';
@@ -4834,6 +4834,37 @@
       peugeot: sp.kmL > 0 && sp.litros > 0 ? sp.litros / sp.kmL * 100 : null };
   }
 
+  // Lo gastado del depósito (no lo repostado): litros de cada trayecto según MyPeugeot, corregidos con el
+  // consumo real (real / MyPeugeot), al precio medio pagado en los repostajes de alrededor (60 días antes y
+  // 30 después). Sin repostajes, el coste de MyPeugeot (con el precio por litro puesto en su app).
+  function gastoCtx() {
+    const reps = repostajes().sort(ordRep);
+    const cr = consumoReal(reps, new Date(todayUtc() - 91 * DAY).toISOString().slice(0, 10)) || consumoReal(reps, null);
+    let factor = cr && cr.peugeot ? cr.l100 / cr.peugeot : 1;
+    if (!(factor > 0.6 && factor < 1.6)) factor = 1;
+    return { reps, factor, precios: new Map() };
+  }
+  function precioEn(fecha, ctx) {
+    if (ctx.precios.has(fecha)) return ctx.precios.get(fecha);
+    const t = utcDay(fecha);
+    const cerca = ctx.reps.filter(r => { const d = (utcDay(r.fecha) - t) / DAY; return d >= -60 && d <= 30; });
+    const l = cerca.reduce((a, r) => a + r.litros, 0);
+    const p = l > 0 ? cerca.reduce((a, r) => a + r.importe, 0) / l : null;
+    ctx.precios.set(fecha, p);
+    return p;
+  }
+  function gastoDe(list, ctx) {
+    let litros = 0, coste = 0;
+    for (const t of list) {
+      if (t.litros === null || t.litros === undefined) { coste += t.coste || 0; continue; }
+      const l = t.litros * ctx.factor;
+      const p = precioEn(t.fecha, ctx);
+      litros += l;
+      coste += p !== null ? l * p : (t.coste || 0) * ctx.factor;
+    }
+    return { litros, coste };
+  }
+
   function openRepostaje(id) {
     const cur = id ? (S.datos.colecciones.repostajes || {})[id] : null;
     const inp = (idAttr, attrs) => h('input', Object.assign({ class: 'input', id: idAttr, autocomplete: 'off' }, attrs));
@@ -4909,6 +4940,7 @@
   function renderCoche(root, cards) {
     const all = trayectos();
     const reps = repostajes();
+    const ctx = gastoCtx();
     const hoy = new Date(todayUtc());
     const y = hoy.getUTCFullYear(), mHoy = hoy.getUTCMonth() + 1;
     const mesKey = t => t.fecha.slice(0, 7);
@@ -4917,20 +4949,13 @@
 
     // Resumen: este mes, lo que va de año y consumo real
     const bloque = (label, list, rlist) => {
-      const s = sumaTray(list);
-      const tray = s.n ? [fmtKm(s.km), plural(s.n, 'trayecto'), fmtL100(s.litros, s.kmL)].filter(Boolean).join(' · ') : 'sin trayectos';
-      if (!reps.length) {
-        return h('div', { class: 'est-main' },
-          h('span', { class: 'stat-label' }, label),
-          h('span', { class: 'est-value' }, fmtEur(s.coste)),
-          h('span', { class: 'stat-sub' }, s.n ? tray + (s.litros ? ' · ' + fmtLitros(s.litros) : '') : 'sin trayectos'));
-      }
+      const sm = sumaTray(list), g = gastoDe(list, ctx);
       const pag = rlist.reduce((a, r) => a + r.importe, 0), lit = rlist.reduce((a, r) => a + r.litros, 0);
       return h('div', { class: 'est-main' },
-        h('span', { class: 'stat-label' }, label + ' · gasolina'),
-        h('span', { class: 'est-value' }, fmtEur(pag)),
-        h('span', { class: 'stat-sub' }, rlist.length ? [plural(rlist.length, 'repostaje'), fmtLitros(lit), fmtEurL(pag / lit)].join(' · ') : 'sin repostajes'),
-        h('span', { class: 'stat-sub' }, tray));
+        h('span', { class: 'stat-label' }, label),
+        h('span', { class: 'est-value' }, sm.n ? fmtEur(g.coste) : '—'),
+        h('span', { class: 'stat-sub' }, sm.n ? [fmtKm(sm.km), plural(sm.n, 'trayecto'), g.litros ? fmtLitros(g.litros) + ' gastados' : null].filter(Boolean).join(' · ') : 'sin trayectos importados'),
+        reps.length ? h('span', { class: 'stat-sub' }, rlist.length ? 'Repostado: ' + [fmtEur(pag), plural(rlist.length, 'vez', 'veces'), fmtEurL(pag / lit)].join(' · ') : 'Repostado: nada') : null);
     };
     const hace3 = new Date(todayUtc() - 91 * DAY).toISOString().slice(0, 10);
     let cr = consumoReal(reps, hace3), periodo = 'últimos 3 meses';
@@ -4959,7 +4984,7 @@
 
     // Gráfico: este año frente al anterior, por mes
     const serie = yr => Array.from({ length: 12 }, (_, m) => {
-      if (kMetric === 'gasolina') {
+      if (kMetric === 'repostado') {
         const rl = repMes(yr, m + 1);
         return rl.length ? Math.round(rl.reduce((a, r) => a + r.importe, 0) * 100) / 100 : null;
       }
@@ -4967,19 +4992,20 @@
       if (!list.length) return null;
       const s = sumaTray(list);
       if (kMetric === 'l100') return s.kmL > 0 && s.litros > 0 ? Math.round(s.litros / s.kmL * 1000) / 10 : null;
-      return Math.round((kMetric === 'km' ? s.km : s.coste) * 100) / 100;
+      return Math.round((kMetric === 'km' ? s.km : gastoDe(list, ctx).coste) * 100) / 100;
     });
     const cur = serie(y), prev = serie(y - 1);
     const hasData = cur.some(v => v !== null) || prev.some(v => v !== null);
     const metricSeg = h('div', { class: 'seg', role: 'group', 'aria-label': 'Ver' },
-      [['gasolina', 'Gasolina'], ['coste', 'Coste estimado'], ['km', 'Km'], ['l100', 'L/100 km']].map(([k, label]) => h('button', { type: 'button', class: kMetric === k ? 'on' : '', 'aria-pressed': kMetric === k ? 'true' : 'false', onclick: () => { kMetric = k; renderConsumos(); } }, label)));
+      [['gasto', 'Gasto'], ['repostado', 'Repostado'], ['km', 'Km'], ['l100', 'L/100 km']].map(([k, label]) => h('button', { type: 'button', class: kMetric === k ? 'on' : '', 'aria-pressed': kMetric === k ? 'true' : 'false', onclick: () => { kMetric = k; renderConsumos(); } }, label)));
     const canvas = h('canvas', { 'aria-label': 'Gráfico del coche: ' + y + ' frente a ' + (y - 1) });
-    const vacio = { gasolina: 'No hay repostajes de estos dos años.', coste: 'No hay trayectos de estos dos años.', km: 'No hay trayectos de estos dos años.', l100: 'No hay trayectos de estos dos años.' };
+    const vacio = { repostado: 'No hay repostajes de estos dos años.', gasto: 'No hay trayectos de estos dos años.', km: 'No hay trayectos de estos dos años.', l100: 'No hay trayectos de estos dos años.' };
     const chartPanel = h('section', { class: 'panel' },
       h('div', { class: 'panel-head' }, h('h2', null, 'Coche · ' + (y - 1) + ' y ' + y),
         h('div', { class: 'legend' }, h('span', { class: 'lg prev' }, String(y - 1)), h('span', { class: 'lg cur', style: '--c:' + COCHE.color }, String(y))),
         metricSeg),
-      kMetric === 'coste' ? h('p', { class: 'hint' }, 'Coste estimado por MyPeugeot con el precio por litro que tiene puesto la app.') : null,
+      kMetric === 'gasto' ? h('p', { class: 'hint' }, reps.length ? 'Lo gastado del depósito: km × consumo real × precio pagado al repostar.' : 'Con el precio por litro puesto en MyPeugeot; apunta tus repostajes para usar el real.') : null,
+      kMetric === 'l100' ? h('p', { class: 'hint' }, 'Consumo según MyPeugeot.') : null,
       hasData ? h('div', { class: 'chart-box' }, canvas) : h('p', { class: 'muted empty-note' }, vacio[kMetric]));
 
     // Historial: trayectos (por meses desplegables) o repostajes
@@ -5004,7 +5030,7 @@
           h('button', { type: 'button', class: 'ev-main as-btn', 'aria-expanded': abierto ? 'true' : 'false', onclick: toggle },
             h('span', { class: 'ev-name' }, nombre),
             h('span', { class: 'ev-what' }, [plural(s.n, 'trayecto'), fmtKm(s.km), fmtL100(s.litros, s.kmL)].filter(Boolean).join(' · '))),
-          h('span', { class: 'ev-amount' }, fmtEur(s.coste)),
+          h('span', { class: 'ev-amount' }, fmtEur(gastoDe(list, ctx).coste)),
           h('div', { class: 'row-tools' },
             h('button', { type: 'button', class: 'icon-btn mini car-chev', 'aria-label': abierto ? 'Ocultar trayectos' : 'Ver trayectos', title: abierto ? 'Ocultar trayectos' : 'Ver trayectos', onclick: toggle }, ICON.right()),
             h('button', { type: 'button', class: 'icon-btn mini', 'aria-label': 'Borrar el mes', title: 'Borrar el mes',
@@ -5017,7 +5043,7 @@
             h('div', { class: 'ev-main' },
               h('span', { class: 'ev-name' }, cap(dia) + ' · ' + t.salida + (t.llegada ? ' → ' + t.llegada : '')),
               h('span', { class: 'ev-what' }, [fmtMin(t.min), fmtKm(t.km), t.consumo !== null && t.consumo !== undefined ? t.consumo.toLocaleString('es-ES') + ' l/100 km' : null].filter(Boolean).join(' · '))),
-            h('span', { class: 'ev-amount' }, t.coste !== null && t.coste !== undefined ? fmtEur(t.coste) : '—'),
+            h('span', { class: 'ev-amount' }, t.litros !== null && t.litros !== undefined || t.coste ? fmtEur(gastoDe([t], ctx).coste) : '—'),
             h('div', { class: 'row-tools' },
               h('button', { type: 'button', class: 'icon-btn mini', 'aria-label': 'Borrar trayecto', title: 'Borrar trayecto',
                 onclick: () => { if (confirm('¿Borrar el trayecto del ' + dia + ' a las ' + t.salida + '?')) borrar([t.id]); } }, ICON.trash()))));
@@ -5062,7 +5088,7 @@
     if (chartObj) { chartObj.destroy(); chartObj = null; }
     if (hasData) {
       const fmt = v => kMetric === 'km' ? fmtKm(v) : kMetric === 'l100' ? v.toLocaleString('es-ES') + ' l/100 km' : fmtEur(v);
-      drawBars(canvas, prev, cur, y, COCHE.color, fmt, v => kMetric === 'coste' || kMetric === 'gasolina' ? v + ' €' : v);
+      drawBars(canvas, prev, cur, y, COCHE.color, fmt, v => kMetric === 'gasto' || kMetric === 'repostado' ? v + ' €' : v);
     }
   }
 
@@ -5105,18 +5131,12 @@
       const l = latest(k);
       return pick(k, T.color, T.nombre, l && l.coste !== null ? fmtEur(l.coste) : '—', l ? MESES_CORTOS[l.mes - 1].toLowerCase() + ' ' + l.anio : 'sin datos');
     }));
-    // Coche: lo pagado en gasolina el último mes con repostajes; sin repostajes, lo estimado por los trayectos
-    const ultimo = list => list.reduce((m, t) => t.fecha.slice(0, 7) > m ? t.fecha.slice(0, 7) : m, '');
-    const mesCorto = mk => MESES_CORTOS[+mk.slice(5, 7) - 1].toLowerCase() + ' ' + mk.slice(0, 4);
-    const reps = repostajes(), tray = trayectos();
-    if (reps.length) {
-      const mk = ultimo(reps), rl = reps.filter(r => r.fecha.startsWith(mk));
-      cards.append(pick('coche', COCHE.color, COCHE.nombre, fmtEur(rl.reduce((a, r) => a + r.importe, 0)), mesCorto(mk) + ' · ' + plural(rl.length, 'repostaje')));
-    } else {
-      const mk = ultimo(tray);
-      const sMes = mk ? sumaTray(tray.filter(t => t.fecha.startsWith(mk))) : null;
-      cards.append(pick('coche', COCHE.color, COCHE.nombre, sMes ? fmtEur(sMes.coste) : '—', sMes ? mesCorto(mk) + ' · ' + fmtKm(sMes.km) : 'sin datos'));
-    }
+    // Coche: lo gastado del depósito el último mes con trayectos (no lo repostado)
+    const tray = trayectos();
+    const mk = tray.reduce((m, t) => t.fecha.slice(0, 7) > m ? t.fecha.slice(0, 7) : m, '');
+    const tMes = mk ? tray.filter(t => t.fecha.startsWith(mk)) : [];
+    cards.append(pick('coche', COCHE.color, COCHE.nombre, mk ? fmtEur(gastoDe(tMes, gastoCtx()).coste) : '—',
+      mk ? MESES_CORTOS[+mk.slice(5, 7) - 1].toLowerCase() + ' ' + mk.slice(0, 4) + ' · ' + fmtKm(sumaTray(tMes).km) : 'sin trayectos'));
     if (cTipo === 'coche') return renderCoche(root, cards);
 
     const T = TIPOS[cTipo];

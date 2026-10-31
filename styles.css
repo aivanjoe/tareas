@@ -481,7 +481,7 @@ a.btn { text-decoration: none; }
 .car-mes .as-btn { color: inherit; font: inherit; }
 .car-chev svg { transition: transform 0.15s; }
 .car-mes.open .car-chev svg { transform: rotate(90deg); }
-.car-trips { display: flex; flex-direction: column; gap: 4px; margin: -2px 0 6px 14px; padding-left: 10px; border-left: 2px solid color-mix(in srgb, #F29E4C 45%, transparent); }
+.car-trips { display: flex; flex-direction: column; gap: 4px; margin: -2px 0 6px 14px; padding-left: 10px; border-left: 2px solid color-mix(in srgb, #B79CF0 45%, transparent); }
 .car-trip { padding: 7px 10px; background: transparent; }
 .car-trip .ev-name { font-size: 13px; font-weight: 600; color: var(--text2); }
 .car-sum .est-main { flex: 1 1 220px; }
