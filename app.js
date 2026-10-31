@@ -13,6 +13,7 @@
     datos: 'mp.datos',
     base: 'mp.datos.base',
     onedrive: 'mp.onedrive',
+    google: 'mp.google',
     ui: 'mp.ui'
   };
   const LEGACY_TAGS_KEY = 'mp.tags'; // formato anterior de las etiquetas, se migra al almacén
@@ -46,6 +47,8 @@
     od: Object.assign({ clientId: '', account: '', etag: null, syncedAt: null }, store.get(KEYS.onedrive, {})),
     odBase: store.get(KEYS.base, null),
     odState: 'idle', // idle | syncing | login | error
+    gg: Object.assign({ clientId: '', account: '', token: null, exp: 0, syncedAt: null }, store.get(KEYS.google, {})),
+    ggState: 'idle', // idle | syncing | login | error
     ui: Object.assign({ sidebarHidden: false, projectId: null, view: 'personal' }, store.get(KEYS.ui, {})),
     filter: new Set(),
     syncing: false,
@@ -216,6 +219,7 @@
     trash: () => svg([{ d: 'M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3' }]),
     edit: () => svg([{ d: 'M4 20h4L19 9l-4-4L4 16v4zM13.5 6.5l4 4' }]),
     file: () => svg([{ d: 'M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z' }, { d: 'M14 3v5h5M9 13h6M9 17h4' }]),
+    cake: () => svg([{ d: 'M4 21h16M5 21v-6a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v6M5 17c1.5 1 3 1 4.5 0s3-1 4.5 0 3 1 5 0M12 13V9' }]),
     comment: () => svg([{ d: 'M20 11.5a7.5 7.5 0 0 1-10.9 6.7L4 19.5l1.3-4.6A7.5 7.5 0 1 1 20 11.5z' }]),
     tag: () => svg([{ d: 'M20.6 13.4l-7.2 7.2a2 2 0 0 1-2.8 0L3 13V3h10l7.6 7.6a2 2 0 0 1 0 2.8z' }, { tag: 'circle', cx: '7.5', cy: '7.5', r: '1.5' }]),
     grip: () => svg([
@@ -568,6 +572,160 @@
 
   const odPending = () => !S.odBase || stable(S.datos.colecciones) !== stable(normalizeDoc(S.odBase).colecciones);
 
+  // ---------- Google (contactos, solo lectura) ----------
+  // OAuth 2.0 para aplicaciones de navegador (flujo implícito) por redirección: la página va a Google
+  // y vuelve con un token de acceso de una hora en el fragmento de la dirección. Sin librerías de Google.
+  const GG_SCOPES = 'https://www.googleapis.com/auth/contacts.readonly email';
+  const GG_STATE = 'mp.google.state';
+  const PEOPLE = 'https://people.googleapis.com/v1/';
+  class GgError extends Error {
+    constructor(kind, message) { super(message); this.kind = kind; }
+  }
+  const saveGg = () => store.set(KEYS.google, S.gg);
+  const ggConnected = () => !!(S.gg.clientId && S.gg.account);
+  const ggTokenOk = () => !!S.gg.token && Date.now() < S.gg.exp - 60000;
+
+  function ggLogin() {
+    const state = uid();
+    sessionStorage.setItem(GG_STATE, state);
+    const q = new URLSearchParams({ client_id: S.gg.clientId, redirect_uri: appUrl(), response_type: 'token', scope: GG_SCOPES, include_granted_scopes: 'true', state });
+    if (S.gg.account) q.set('login_hint', S.gg.account); else q.set('prompt', 'select_account');
+    location.assign('https://accounts.google.com/o/oauth2/v2/auth?' + q);
+  }
+
+  // Vuelta del login de Google. Solo se procesa si el "state" es el que se guardó al salir
+  // (así no se confunde con la vuelta de Microsoft).
+  function ggHandleReturn() {
+    const hash = location.hash.slice(1);
+    if (!/(^|&)(access_token|error)=/.test(hash)) return;
+    const q = new URLSearchParams(hash);
+    const saved = sessionStorage.getItem(GG_STATE);
+    if (!saved || q.get('state') !== saved) return;
+    sessionStorage.removeItem(GG_STATE);
+    history.replaceState(null, '', location.pathname + location.search);
+    if (q.get('error')) {
+      toast(q.get('error') === 'access_denied' ? 'Has cancelado la conexión con Google.' : 'Google no permitió la conexión (' + q.get('error') + ').', 'error', null, 10000);
+      return;
+    }
+    if (!(q.get('scope') || '').includes('contacts.readonly')) {
+      toast('Para leer tus contactos hay que marcar el permiso de contactos en Google.', 'error', null, 10000);
+      return;
+    }
+    S.gg.token = q.get('access_token');
+    S.gg.exp = Date.now() + (parseInt(q.get('expires_in'), 10) || 3600) * 1000;
+    saveGg();
+    ggAfterLogin();
+  }
+
+  async function ggAfterLogin() {
+    try {
+      if (!S.gg.account) {
+        const me = await ggGet('https://www.googleapis.com/oauth2/v3/userinfo');
+        S.gg.account = me.email || 'Cuenta de Google';
+        saveGg();
+        toast('Google conectado');
+      }
+    } catch (e) { /* se reintenta al sincronizar */ }
+    S.ggState = 'idle';
+    syncContactos();
+  }
+
+  function ggDisconnect() {
+    if (S.gg.token) fetch('https://oauth2.googleapis.com/revoke?token=' + encodeURIComponent(S.gg.token), { method: 'POST', mode: 'no-cors' }).catch(() => {});
+    S.gg.account = '';
+    S.gg.token = null;
+    S.gg.exp = 0;
+    S.gg.syncedAt = null;
+    saveGg();
+    S.ggState = 'idle';
+    renderSyncState();
+  }
+
+  async function ggGet(url) {
+    if (!ggTokenOk()) throw new GgError('login', 'La sesión de Google ha caducado. Vuelve a conectar.');
+    let r;
+    try { r = await fetch(url, { headers: { Authorization: 'Bearer ' + S.gg.token } }); }
+    catch (e) { throw new GgError('network', 'No se pudo conectar con Google. Revisa la conexión.'); }
+    if (r.status === 401) { S.gg.token = null; saveGg(); throw new GgError('login', 'La sesión de Google ha caducado. Vuelve a conectar.'); }
+    if (r.status === 403) throw new GgError('http', 'Google no deja leer los contactos (403). Revisa que la People API esté activada en tu proyecto.');
+    if (!r.ok) throw new GgError('http', 'Google respondió con un error (' + r.status + ').');
+    return r.json();
+  }
+
+  // Contacto de Google -> registro de la colección "contactos"
+  function contactFrom(p, groups) {
+    const prim = arr => (arr || []).find(x => x.metadata && x.metadata.primary) || (arr || [])[0];
+    const nm = prim(p.names);
+    const bd = prim((p.birthdays || []).filter(b => b.date && b.date.month && b.date.day));
+    const two = n => String(n).padStart(2, '0');
+    const org = prim(p.organizations);
+    const id = 'g-' + String(p.resourceName).replace(/^people\//, '');
+    const labels = [];
+    let favorito = false;
+    for (const m of p.memberships || []) {
+      const rn = m.contactGroupMembership && m.contactGroupMembership.contactGroupResourceName;
+      if (rn === 'contactGroups/starred') favorito = true;
+      else if (groups[rn]) labels.push(groups[rn]);
+    }
+    return {
+      id, resourceName: p.resourceName,
+      nombre: (nm && nm.displayName) || (prim(p.emailAddresses) || {}).value || 'Sin nombre',
+      telefonos: (p.phoneNumbers || []).map(x => ({ valor: x.value, tipo: x.formattedType || '' })).filter(x => x.valor),
+      emails: (p.emailAddresses || []).map(x => ({ valor: x.value, tipo: x.formattedType || '' })).filter(x => x.valor),
+      cumple: bd ? (bd.date.year ? bd.date.year + '-' : '--') + two(bd.date.month) + '-' + two(bd.date.day) : null,
+      notas: ((p.biographies || [])[0] || {}).value || '',
+      etiquetas: labels.sort((a, b) => a.localeCompare(b, 'es')),
+      favorito,
+      direcciones: (p.addresses || []).map(x => ({ valor: x.formattedValue || [x.streetAddress, x.postalCode, x.city].filter(Boolean).join(', '), tipo: x.formattedType || '' })).filter(x => x.valor),
+      empresa: org ? [org.name, org.title].filter(Boolean).join(' · ') : ''
+    };
+  }
+
+  async function syncContactos(opts = {}) {
+    if (!ggConnected() && !S.gg.token) return;
+    if (S.ggState === 'syncing') return;
+    S.ggState = 'syncing';
+    renderSyncState();
+    try {
+      const groups = {};
+      let page = '';
+      do {
+        const r = await ggGet(PEOPLE + 'contactGroups?pageSize=1000' + (page ? '&pageToken=' + encodeURIComponent(page) : ''));
+        for (const g of r.contactGroups || []) if (g.groupType === 'USER_CONTACT_GROUP') groups[g.resourceName] = g.formattedName || g.name;
+        page = r.nextPageToken || '';
+      } while (page);
+      const recs = {};
+      const fields = 'names,emailAddresses,phoneNumbers,birthdays,biographies,memberships,addresses,organizations';
+      do {
+        const r = await ggGet(PEOPLE + 'people/me/connections?personFields=' + fields + '&pageSize=1000' + (page ? '&pageToken=' + encodeURIComponent(page) : ''));
+        for (const p of r.connections || []) { const c = contactFrom(p, groups); recs[c.id] = c; }
+        page = r.nextPageToken || '';
+      } while (page);
+      if (stable(recs) !== stable(S.datos.colecciones.contactos || {})) {
+        S.datos.colecciones.contactos = recs;
+        saveDatos();
+      }
+      S.gg.syncedAt = Date.now();
+      saveGg();
+      S.ggState = 'idle';
+      if (S.ui.view === 'contactos') applyView();
+      if (opts.notify) toast(Object.keys(recs).length + ' contactos actualizados desde Google');
+    } catch (e) {
+      S.ggState = e.kind === 'login' ? 'login' : 'error';
+      if (e.kind === 'login') toast(e.message, 'error', { label: 'Conectar', fn: ggLogin }, 10000);
+      else toast(e.message || 'Error al leer los contactos de Google.', 'error');
+    } finally {
+      renderSyncState();
+    }
+  }
+
+  // Desde un botón: si el permiso caducó, se va a Google (vuelve y sincroniza solo)
+  function ggRefresh() {
+    if (!S.gg.clientId) { openSettings(); return; }
+    if (ggTokenOk()) syncContactos({ notify: true });
+    else ggLogin();
+  }
+
   // ---------- datos derivados ----------
   function currentProjectId() {
     if (!S.data) return null;
@@ -644,6 +802,15 @@
         : relTime(S.od.syncedAt);
       document.getElementById('syncOdState').textContent = st;
       od.classList.toggle('warn', S.odState === 'login' || S.odState === 'error');
+    }
+    const gg = document.getElementById('syncGg');
+    gg.hidden = !ggConnected();
+    if (ggConnected()) {
+      document.getElementById('syncGgState').textContent = S.ggState === 'syncing' ? 'leyendo…'
+        : (S.ggState === 'login' || !ggTokenOk()) && S.gg.syncedAt ? relTime(S.gg.syncedAt)
+        : S.ggState === 'error' ? 'con error'
+        : relTime(S.gg.syncedAt);
+      gg.classList.toggle('warn', S.ggState === 'error');
     }
     const btn = document.getElementById('syncBtn');
     btn.disabled = busy;
@@ -1412,6 +1579,61 @@
     return box;
   }
 
+  // Ajustes · Google
+  function ggSection() {
+    const box = h('div', { class: 'modal-section' });
+    const draw = () => {
+      const intro = h('p', { class: 'muted' }, 'Lee tus contactos de Google (solo lectura): teléfonos, correos, cumpleaños, notas y categorías.');
+      if (!S.gg.clientId) {
+        const input = h('input', { class: 'input', type: 'text', placeholder: 'ID de cliente de Google', autocomplete: 'off', spellcheck: 'false', 'aria-label': 'ID de cliente de Google' });
+        const saveId = () => {
+          const v = input.value.trim();
+          if (!/^[\w-]+\.apps\.googleusercontent\.com$/.test(v)) { toast('El ID de cliente termina en .apps.googleusercontent.com', 'error'); input.focus(); return; }
+          S.gg.clientId = v;
+          saveGg();
+          draw();
+        };
+        input.addEventListener('keydown', e => { if (e.key === 'Enter') saveId(); });
+        box.replaceChildren(h('h3', null, 'Google'), intro,
+          h('p', { class: 'muted' }, 'Pega el ID de cliente que creaste en Google Cloud (tipo «Aplicación web»).'),
+          input, h('div', { class: 'row-actions' }, h('button', { type: 'button', class: 'btn ghost small', onclick: saveId }, 'Guardar')));
+        return;
+      }
+      const changeId = h('button', {
+        type: 'button', class: 'btn subtle small',
+        onclick: () => {
+          if (!confirm('¿Cambiar el ID de cliente de Google? Se desconectará Google en este navegador.')) return;
+          ggDisconnect();
+          S.gg.clientId = '';
+          saveGg();
+          draw();
+        }
+      }, 'Cambiar ID de cliente');
+      if (!ggConnected()) {
+        box.replaceChildren(h('h3', null, 'Google'), intro,
+          h('div', { class: 'row-actions' }, h('button', { type: 'button', class: 'btn primary small', onclick: ggLogin }, 'Conectar con Google'), changeId));
+        return;
+      }
+      const n = Object.keys(S.datos.colecciones.contactos || {}).length;
+      box.replaceChildren(h('h3', null, 'Google'),
+        h('p', { class: 'muted' }, 'Conectado como ', h('strong', null, S.gg.account), '.'),
+        h('p', { class: 'muted' }, n + ' contactos · ' + (S.gg.syncedAt ? 'leídos ' + relTime(S.gg.syncedAt) : 'sin leer todavía') + '. El permiso de Google dura una hora; después, «Actualizar contactos» vuelve a pedirlo.'),
+        h('div', { class: 'row-actions' },
+          h('button', { type: 'button', class: 'btn ghost small', onclick: ggRefresh }, 'Actualizar contactos'),
+          h('button', {
+            type: 'button', class: 'btn subtle small',
+            onclick: () => {
+              if (!confirm('¿Desconectar Google en este navegador? Los contactos ya leídos se quedan en la app.')) return;
+              ggDisconnect();
+              draw();
+            }
+          }, 'Desconectar')));
+    };
+    draw();
+    const timer = setInterval(() => { if (!box.isConnected) clearInterval(timer); else if (!(box.contains(document.activeElement) && document.activeElement.tagName === 'INPUT')) draw(); }, 1000);
+    return box;
+  }
+
   // Ajustes
   function openSettings() {
     const fileInput = h('input', { type: 'file', accept: 'application/json,.json', hidden: true });
@@ -1468,6 +1690,7 @@
         h('div', { class: 'row-actions' },
           h('button', { type: 'button', class: 'btn ghost small', onclick: () => { close(); openSetup(); } }, 'Cambiar token'))),
       odSection(),
+      ggSection(),
       h('div', { class: 'modal-section' },
         h('h3', null, 'Copia de seguridad'),
         h('p', { class: 'muted' }, 'Exporta todos los datos de la app en un fichero, o importa una copia. Al importar se sustituye solo lo que trae el fichero (por ejemplo, gastos y pagos); lo demás no se toca.'),
@@ -1486,6 +1709,7 @@
                 ? '¿Borrar todos los datos de la app en este navegador? Tus datos siguen en OneDrive.'
                 : '¿Borrar todos los datos de la app en este navegador? Exporta antes una copia si quieres conservarlos.';
               if (!confirm(aviso)) return;
+              if (S.gg.token) ggDisconnect();
               Object.values(KEYS).concat(LEGACY_TAGS_KEY).forEach(k => localStorage.removeItem(k));
               Object.keys(localStorage).filter(k => k.startsWith('msal.')).forEach(k => localStorage.removeItem(k));
               location.reload();
@@ -1498,7 +1722,7 @@
   // Pantallas propias: sección en index.html (#view<Nombre>), función que la pinta y acción del botón principal
   const VIEWS = {
     personal: { title: 'Personal', add: 'Añadir tarea' },
-    contactos: { title: 'Contactos', eyebrow: 'Cumpledías y cumpleaños', add: 'Añadir persona', el: 'viewContactos', render: () => renderCumpledias(), onAdd: () => openPerson(null) },
+    contactos: { title: 'Contactos', eyebrow: 'Agenda y cumpledías', add: () => ctTab() === 'agenda' ? 'Actualizar contactos' : 'Añadir persona', el: 'viewContactos', render: () => renderCumpledias(), onAdd: () => ctTab() === 'agenda' ? ggRefresh() : openPerson(null) },
     gastos: { title: 'Gastos', eyebrow: 'Pagos recurrentes', add: 'Nuevo gasto', el: 'viewGastos', render: () => renderGastos(), onAdd: () => openGasto(null) },
     consumos: { title: 'Consumos', eyebrow: 'Luz, gas y agua', add: 'Subir facturas', el: 'viewConsumos', render: () => renderConsumos(), onAdd: () => pickFacturas() }
   };
@@ -1517,7 +1741,7 @@
     const eb = document.getElementById('eyebrowOther');
     eb.hidden = board;
     eb.textContent = cfg.eyebrow || '';
-    document.getElementById('addLabel').textContent = cfg.add;
+    document.getElementById('addLabel').textContent = typeof cfg.add === 'function' ? cfg.add() : cfg.add;
     document.getElementById('tagbar').hidden = !board;
     document.getElementById('boardWrap').hidden = !board;
     for (const [k, c] of Object.entries(VIEWS)) if (c.el) document.getElementById(c.el).hidden = k !== v;
@@ -1557,6 +1781,14 @@
 
   // Próximos hitos de una persona (desde hoy, incluido): tres de días de vida y su próximo cumpleaños
   function personEvents(p, today) {
+    if (/^--\d{2}-\d{2}$/.test(p.birth || '')) {
+      // Sin año (contactos de Google): solo el cumpleaños, sin edad ni días de vida
+      const bm = +p.birth.slice(2, 4) - 1, bd = +p.birth.slice(5, 7);
+      const onYear = y => Date.UTC(y, bm, bm === 1 && bd === 29 && !isLeap(y) ? 28 : bd);
+      let y = new Date(today).getUTCFullYear();
+      if (onYear(y) < today) y++;
+      return [{ kind: 'cumple', p, value: null, date: onYear(y), until: Math.round((onYear(y) - today) / DAY) }];
+    }
     const birth = utcDay(p.birth);
     const lived = Math.round((today - birth) / DAY);
     const out = [];
@@ -1570,11 +1802,127 @@
     return out.map(e => Object.assign(e, { until: Math.round((e.date - today) / DAY) }));
   }
 
+  // Pantalla Contactos: pestañas Agenda (contactos de Google) y Cumpledías
+  const contactos = () => Object.values(S.datos.colecciones.contactos || {});
+  const ctTab = () => S.ui.ctTab || (contactos().length ? 'agenda' : 'cumpledias');
+  const normName = s => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/\s+/g, ' ').trim();
+  // Color estable para cada categoría de Google (no se guarda: sale del nombre)
+  function catColorC(name) {
+    let hsh = 0;
+    for (const ch of String(name)) hsh = (hsh * 31 + ch.codePointAt(0)) >>> 0;
+    return PALETTE[hsh % PALETTE.length];
+  }
+  const cdCats = () => (((S.datos.colecciones.ajustes || {}).cumpledias || {}).etiquetas || []);
+  let agQuery = '';
+  let agCat = null; // null | '★' | nombre de categoría
+
+  // Personas de Cumpledías: las añadidas a mano y los contactos de Google con cumpleaños de las categorías elegidas
+  function cumplePeople() {
+    const manual = personas().filter(p => isYmd(p.birth)).map(p => ({ id: p.id, name: p.name, birth: p.birth, src: 'manual' }));
+    const ya = new Set(manual.map(p => normName(p.name)));
+    const sel = cdCats();
+    const google = contactos()
+      .filter(c => c.cumple && (c.etiquetas || []).some(e => sel.includes(e)) && !ya.has(normName(c.nombre)))
+      .map(c => ({ id: c.id, name: c.nombre, birth: c.cumple, src: 'google' }));
+    return manual.concat(google).sort((a, b) => a.name.localeCompare(b.name, 'es'));
+  }
+
   function renderCumpledias() {
     const root = document.getElementById('viewContactos');
     const today = todayUtc();
     root.dataset.day = String(today);
-    const people = personas().filter(p => isYmd(p.birth)).sort((a, b) => a.name.localeCompare(b.name, 'es'));
+    const tab = ctTab();
+    const tabs = h('div', { class: 'seg', role: 'group', 'aria-label': 'Vista' },
+      [['agenda', 'Agenda'], ['cumpledias', 'Cumpledías']].map(([k, label]) =>
+        h('button', { type: 'button', class: tab === k ? 'on' : '', 'aria-pressed': tab === k ? 'true' : 'false', onclick: () => { S.ui.ctTab = k; saveUi(); applyView(); } }, label)));
+    const head = h('div', { class: 'g-toolbar' }, tabs);
+    root.replaceChildren(head, ...(tab === 'agenda' ? agendaNodes() : cumpleNodes(today)));
+  }
+
+  function agendaNodes() {
+    const all = contactos().sort((a, b) => a.nombre.localeCompare(b.nombre, 'es'));
+    if (!all.length) {
+      return [h('section', { class: 'panel' },
+        h('p', { class: 'muted empty-note' }, S.gg.clientId
+          ? 'Aún no has leído tus contactos de Google.'
+          : 'Conecta tu cuenta de Google en Ajustes para ver aquí tus contactos (teléfonos, correos, cumpleaños, notas y categorías).'),
+        h('div', { class: 'row-actions' }, S.gg.clientId
+          ? h('button', { type: 'button', class: 'btn primary small', onclick: ggRefresh }, ggConnected() ? 'Leer contactos' : 'Conectar con Google')
+          : h('button', { type: 'button', class: 'btn ghost small', onclick: openSettings }, 'Ir a Ajustes')))];
+    }
+    const cats = [...new Set(all.flatMap(c => c.etiquetas || []))].sort((a, b) => a.localeCompare(b, 'es'));
+    if (agCat && agCat !== '★' && !cats.includes(agCat)) agCat = null;
+    const search = h('input', { class: 'input search', type: 'search', placeholder: 'Buscar por nombre, teléfono o correo', value: agQuery, 'aria-label': 'Buscar contactos', autocomplete: 'off' });
+    const chip = (key, label, color) => h('button', {
+      type: 'button', class: 'chip' + (agCat === key ? ' on' : ''), style: '--c:' + color, 'aria-pressed': agCat === key ? 'true' : 'false',
+      onclick: () => { agCat = agCat === key ? null : key; renderCumpledias(); }
+    }, key === null ? null : h('span', { class: 'dot' }), label);
+    const chips = h('div', { class: 'chips' },
+      chip(null, 'Todos', '#C9D0DC'),
+      all.some(c => c.favorito) ? chip('★', 'Favoritos', '#DBF266') : null,
+      cats.map(c => chip(c, c, catColorC(c))));
+    const count = h('span', { class: 'panel-total' });
+    const list = h('div', { class: 'ev-list' });
+    const draw = () => {
+      const q = normName(agQuery), qd = agQuery.replace(/\D/g, '');
+      const shown = all.filter(c => (agCat === null || (agCat === '★' ? c.favorito : (c.etiquetas || []).includes(agCat))) &&
+        (!q || normName(c.nombre).includes(q) || (c.emails || []).some(e => normName(e.valor).includes(q)) || (qd.length >= 3 && (c.telefonos || []).some(t => t.valor.replace(/\D/g, '').includes(qd)))));
+      count.textContent = shown.length + (shown.length === 1 ? ' contacto' : ' contactos');
+      list.replaceChildren(...shown.slice(0, 400).map(contactRow));
+      if (!shown.length) list.append(h('p', { class: 'muted empty-note' }, 'Ningún contacto coincide.'));
+    };
+    search.addEventListener('input', () => { agQuery = search.value; draw(); });
+    draw();
+    return [h('section', { class: 'panel' },
+      h('div', { class: 'panel-head' }, search, count), chips, list)];
+  }
+
+  function contactRow(c) {
+    const color = (c.etiquetas || []).length ? catColorC(c.etiquetas[0]) : '#9AA4B5';
+    const ini = c.nombre.split(/\s+/).filter(Boolean).slice(0, 2).map(w => w[0]).join('').toUpperCase();
+    const sub = [];
+    if ((c.telefonos || [])[0]) sub.push(c.telefonos[0].valor);
+    if ((c.emails || [])[0]) sub.push(c.emails[0].valor);
+    return h('button', { type: 'button', class: 'ev contact', onclick: () => openContacto(c.id) },
+      h('span', { class: 'avatar', style: '--c:' + color }, ini || '·'),
+      h('span', { class: 'ev-main' },
+        h('span', { class: 'ev-name' }, c.nombre, c.favorito ? h('span', { class: 'star', title: 'Favorito' }, ' ★') : null),
+        h('span', { class: 'ev-what' }, sub.join(' · ') || 'Sin teléfono ni correo')),
+      h('span', { class: 'cat-dots' }, (c.etiquetas || []).slice(0, 4).map(e => h('span', { class: 'cat-dot', style: '--c:' + catColorC(e), title: e }))));
+  }
+
+  // Ficha de contacto (solo lectura; se edita en Google Contactos)
+  function openContacto(id) {
+    const c = (S.datos.colecciones.contactos || {})[id];
+    if (!c) return;
+    const rows = [];
+    const sect = (label, items) => { if (items.length) rows.push(h('div', { class: 'field' }, h('span', { class: 'field-label' }, label), ...items)); };
+    const line = (main, tipo, href) => h('div', { class: 'ct-line' },
+      href ? h('a', { href, class: 'ct-link' }, main) : h('span', null, main),
+      tipo ? h('span', { class: 'ct-type' }, tipo) : null);
+    sect('Teléfonos', (c.telefonos || []).map(t => line(t.valor, t.tipo, 'tel:' + t.valor.replace(/[^\d+]/g, ''))));
+    sect('Correos', (c.emails || []).map(e => line(e.valor, e.tipo, /^[^\s@]+@[^\s@]+$/.test(e.valor) ? 'mailto:' + e.valor : null)));
+    if (c.cumple) {
+      const full = /^\d{4}/.test(c.cumple);
+      const [, mm, dd] = c.cumple.replace(/^--/, '0000-').split('-');
+      const txt = full ? fmtDay(utcDay(c.cumple)) : (+dd) + ' de ' + MESES_LARGOS_CT[+mm - 1];
+      sect('Cumpleaños', [line(txt, full ? Math.floor((todayUtc() - utcDay(c.cumple)) / DAY / 365.2425) + ' años' : '', null)]);
+    }
+    if ((c.etiquetas || []).length) sect('Categorías', [h('div', { class: 'chips' }, c.etiquetas.map(e => h('span', { class: 'chip on static', style: '--c:' + catColorC(e) }, h('span', { class: 'dot' }), e)))]);
+    if (c.empresa) sect('Empresa', [line(c.empresa, '', null)]);
+    sect('Direcciones', (c.direcciones || []).map(d => line(d.valor, d.tipo, null)));
+    if (c.notas) sect('Notas', [h('div', { class: 'note-text' }, c.notas)]);
+    const gid = String(c.resourceName || '').replace(/^people\//, '');
+    const body = h('div', { class: 'form' }, ...rows,
+      rows.length ? null : h('p', { class: 'muted' }, 'Este contacto no tiene más datos.'),
+      h('div', { class: 'row-actions modal-foot' },
+        h('a', { class: 'btn ghost small', href: 'https://contacts.google.com/person/' + encodeURIComponent(gid), target: '_blank', rel: 'noopener noreferrer' }, 'Editar en Google Contactos')));
+    openModal(c.nombre + (c.favorito ? ' ★' : ''), body);
+  }
+  const MESES_LARGOS_CT = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre'];
+
+  function cumpleNodes(today) {
+    const people = cumplePeople();
     const all = people.flatMap(p => personEvents(p, today)).sort((a, b) => a.date - b.date || a.p.name.localeCompare(b.p.name, 'es'));
     const events = all.filter(e => cdFilter === 'todo' || e.kind === cdFilter);
 
@@ -1589,44 +1937,66 @@
       stat('Próximo', next ? (next.until === 0 ? 'Hoy' : fmtNum(next.until)) : '—', next ? (next.until === 0 ? next.p.name : (next.until === 1 ? 'día · ' : 'días · ') + next.p.name) : 'sin personas', 'accent'),
       stat('Este mes', String(inMonth), inMonth === 1 ? 'evento' : 'eventos'),
       stat('Este año', String(inYear), inYear === 1 ? 'evento' : 'eventos'),
-      stat('Personas', String(people.length), people.length === 1 ? 'guardada' : 'guardadas'));
+      stat('Personas', String(people.length), people.length === 1 ? 'en la lista' : 'en la lista'));
 
     const filters = h('div', { class: 'seg', role: 'group', 'aria-label': 'Filtrar' },
-      [['todo', 'Todo'], ['dias', 'Cumpledías'], ['cumple', 'Cumpleaños']].map(([k, label]) =>
+      [['todo', 'Todo'], ['dias', 'Días de vida'], ['cumple', 'Cumpleaños']].map(([k, label]) =>
         h('button', { type: 'button', class: cdFilter === k ? 'on' : '', 'aria-pressed': cdFilter === k ? 'true' : 'false', onclick: () => { cdFilter = k; renderCumpledias(); } }, label)));
 
     const list = h('div', { class: 'ev-list' });
     for (const e of events.slice(0, 20)) {
-      const badge = e.kind === 'dias' ? fmtNum(e.value / 1000) + 'k' : String(e.value);
-      const what = e.kind === 'dias' ? 'Cumple ' + fmtNum(e.value) + ' días de vida' : 'Cumple ' + e.value + (e.value === 1 ? ' año' : ' años');
+      const badge = e.kind === 'dias' ? fmtNum(e.value / 1000) + 'k' : e.value === null ? '' : String(e.value);
+      const what = e.kind === 'dias' ? 'Cumple ' + fmtNum(e.value) + ' días de vida' : e.value === null ? 'Cumpleaños' : 'Cumple ' + e.value + (e.value === 1 ? ' año' : ' años');
       list.append(h('div', { class: 'ev' + (e.until === 0 ? ' today' : '') },
-        h('span', { class: 'ev-badge ' + e.kind, title: e.kind === 'dias' ? 'Cumpledías' : 'Cumpleaños' }, badge),
+        h('span', { class: 'ev-badge ' + e.kind, title: e.kind === 'dias' ? 'Cumpledías' : 'Cumpleaños' }, badge || ICON.cake()),
         h('div', { class: 'ev-main' }, h('span', { class: 'ev-name' }, e.p.name), h('span', { class: 'ev-what' }, what)),
         h('div', { class: 'ev-when' },
           h('span', { class: 'ev-date' }, fmtDay(e.date)),
           h('span', { class: 'ev-until' + (e.until === 0 ? ' now' : e.until <= 30 ? ' soon' : '') }, untilText(e.until)))));
     }
-    if (!events.length) list.append(h('p', { class: 'muted empty-note' }, people.length ? 'No hay eventos con este filtro.' : 'Añade personas para ver sus próximos cumpledías y cumpleaños.'));
+    if (!events.length) list.append(h('p', { class: 'muted empty-note' }, people.length ? 'No hay eventos con este filtro.' : 'Añade personas o elige categorías de Google para ver sus próximos cumpledías y cumpleaños.'));
 
     const plist = h('div', { class: 'people' });
     for (const p of people) {
-      const lived = Math.round((today - utcDay(p.birth)) / DAY);
-      plist.append(h('button', { type: 'button', class: 'person', onclick: () => openPerson(p.id) },
-        h('span', { class: 'person-name' }, p.name),
-        h('span', { class: 'person-sub' }, fmtDay(utcDay(p.birth)) + ' · ' + fmtNum(lived) + ' días')));
+      const full = isYmd(p.birth);
+      const sub = full ? fmtDay(utcDay(p.birth)) + ' · ' + fmtNum(Math.round((today - utcDay(p.birth)) / DAY)) + ' días' : 'Sin año de nacimiento';
+      plist.append(h('button', { type: 'button', class: 'person', onclick: () => p.src === 'google' ? openContacto(p.id) : openPerson(p.id) },
+        h('span', { class: 'person-name' }, p.name, p.src === 'google' ? h('span', { class: 'src-tag' }, 'Google') : null),
+        h('span', { class: 'person-sub' }, sub)));
     }
     if (!people.length) plist.append(h('p', { class: 'muted empty-note' }, 'Todavía no hay nadie.'));
 
-    root.replaceChildren(
-      stats,
+    // Categorías de Google que entran en Cumpledías
+    const cats = [...new Set(contactos().flatMap(c => c.etiquetas || []))].sort((a, b) => a.localeCompare(b, 'es'));
+    const sel = cdCats();
+    const catsPanel = cats.length ? h('section', { class: 'panel' },
+      h('div', { class: 'panel-head' }, h('h2', null, 'Contactos de Google en Cumpledías')),
+      h('p', { class: 'hint' }, 'Elige las categorías cuyos cumpleaños quieres ver aquí.'),
+      h('div', { class: 'chips' }, cats.map(c => {
+        const on = sel.includes(c);
+        const n = contactos().filter(x => x.cumple && (x.etiquetas || []).includes(c)).length;
+        return h('button', {
+          type: 'button', class: 'chip' + (on ? ' on' : ''), style: '--c:' + catColorC(c), 'aria-pressed': on ? 'true' : 'false',
+          onclick: () => {
+            const next = on ? sel.filter(x => x !== c) : sel.concat(c);
+            S.datos.colecciones.ajustes = Object.assign({}, S.datos.colecciones.ajustes, { cumpledias: { id: 'cumpledias', etiquetas: next.sort() } });
+            saveDatos();
+            renderCumpledias();
+          }
+        }, h('span', { class: 'dot' }), c + ' (' + n + ')');
+      }))) : null;
+
+    return [stats,
       h('div', { class: 'cd-grid' },
         h('section', { class: 'panel' },
           h('div', { class: 'panel-head' }, h('h2', null, 'Próximos'), filters),
           list),
-        h('section', { class: 'panel' },
-          h('div', { class: 'panel-head' }, h('h2', null, 'Personas'),
-            h('button', { type: 'button', class: 'btn subtle small', onclick: () => openPerson(null) }, ICON.plus(), 'Añadir')),
-          plist)));
+        h('div', { class: 'stack' },
+          h('section', { class: 'panel' },
+            h('div', { class: 'panel-head' }, h('h2', null, 'Personas'),
+              h('button', { type: 'button', class: 'btn subtle small', onclick: () => openPerson(null) }, ICON.plus(), 'Añadir')),
+            plist),
+          catsPanel))];
   }
 
   function openPerson(id) {
@@ -2527,6 +2897,8 @@
       // Si la sesión de OneDrive caducó, este clic lleva al login de Microsoft
       if (odConnected() && S.odState === 'login') odConnect();
       else syncDatos();
+      // Contactos de Google: solo si el permiso sigue vigente (no se sale de la página sin pedirlo)
+      if (ggConnected() && ggTokenOk()) syncContactos();
       doSync();
     });
     document.getElementById('addBtn').addEventListener('click', () => {
@@ -2563,6 +2935,7 @@
   function start() {
     bind();
     renderAll();
+    ggHandleReturn();
     // MSAL se prepara al arrancar (sin conectar con nada) para que el login responda al primer clic
     if (S.od.clientId) loadMsal().catch(() => {});
     if (!S.token) openSetup();

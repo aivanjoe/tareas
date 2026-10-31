@@ -46,6 +46,7 @@ Encima de las tareas de origen, la app añade su propia capa: **etiquetas con no
 | `mp.datos` | Almacén de datos propios de la app (ver abajo) |
 | `mp.datos.base` | Última versión sincronizada con OneDrive (base de la fusión) |
 | `mp.onedrive` | `{ clientId, account, etag, syncedAt }` |
+| `mp.google` | `{ clientId, account, token, exp, syncedAt }` (token de acceso de Google, dura una hora) |
 | `msal.*` | Caché de sesión de MSAL (la gestiona la librería) |
 | `mp.ui` | Preferencias de interfaz (`sidebarHidden`, `projectId`) |
 
@@ -62,6 +63,14 @@ Encima de las tareas de origen, la app añade su propia capa: **etiquetas con no
 - **Estado:** en la barra lateral, bajo Todoist, aparece OneDrive con la hora o "cambios sin subir", "reconectar" o "con error". En Ajustes, sección OneDrive: Client ID, Conectar, cuenta, Sincronizar ahora y Desconectar (desconectar no borra datos).
 - **Pruebas:** sin cuenta real, se prueba en local con MSAL y Graph simulados (dos "dispositivos" contra el mismo OneDrive simulado, con conflictos de eTag).
 
+## Google: contactos (hecho, solo lectura)
+
+- **Proyecto de Google Cloud del usuario** (modo pruebas, el usuario como usuario de prueba), People API activada, ID de cliente de tipo "Aplicación web" con orígenes `https://aivanjoe.github.io` y `http://localhost:8000` y URIs de redirección `https://aivanjoe.github.io/tareas/` y `http://localhost:8000/`. El ID de cliente se introduce en Ajustes → Google. El mismo proyecto servirá para Google Calendar.
+- **Login sin librerías de Google:** OAuth 2.0 para aplicaciones de navegador (flujo implícito, `response_type=token`) por redirección a `accounts.google.com/o/oauth2/v2/auth`, con `state` aleatorio guardado en `sessionStorage` (así la vuelta de Microsoft no se confunde con la de Google). Permisos: `contacts.readonly` y `email` (para saber la cuenta). Primera vez con `prompt=select_account`; después con `login_hint`. El token vale una hora: no se renueva solo.
+- **Lectura:** `people/me/connections` (paginado) con `names, emailAddresses, phoneNumbers, birthdays, biographies, memberships, addresses, organizations`, y `contactGroups` para los nombres de las categorías (solo las del usuario; "Destacados" se guarda como `favorito`). Se sustituye entera la colección `contactos` del almacén (`{id: 'g-<id>', resourceName, nombre, telefonos, emails, cumple: 'AAAA-MM-DD'|'--MM-DD', notas, etiquetas, favorito, direcciones, empresa}`), que se sincroniza con OneDrive como lo demás.
+- **Cuándo:** al volver del login, con «Actualizar contactos» (va a Google si el permiso caducó) y al pulsar Sincronizar **solo si el permiso sigue vigente** (Sincronizar nunca saca de la página).
+- Los contactos no se editan en la app: la ficha enlaza a Google Contactos.
+
 ## Integración con Todoist (hecha)
 
 - API v1, endpoint único `https://api.todoist.com/api/v1/sync`, autenticación `Authorization: Bearer <token>`, cuerpo `application/x-www-form-urlencoded`.
@@ -74,7 +83,9 @@ Encima de las tareas de origen, la app añade su propia capa: **etiquetas con no
 
 - **Sincronización manual.** Solo se conecta con las fuentes cuando el usuario pulsa Sincronizar o hace un cambio (mover, crear, renombrar, completar, cambiar datos de la app). Al abrir la app se muestra la última copia guardada. No añadir sincronización periódica ni al arrancar.
 - **Pantallas separadas: Personal, Trabajo, Calendario y las propias de la app (Contactos, Gastos, Consumos, …).** No mezclar Planner y Todoist en un mismo tablero. La pantalla activa se recuerda por navegador (`mp.ui.view`). La cabecera cambia con la pantalla: título, antetítulo y el botón principal ("Añadir tarea", "Añadir persona"…); Sincronizar es común.
-- **Contactos** (en el menú; antetítulo "Cumpledías y cumpleaños"): colección `personas` (`{id, name, birth: 'AAAA-MM-DD'}`, pensada para enlazar más adelante con contactos de Google). Muestra, desde hoy incluido, los tres próximos múltiplos de 5.000 días de vida de cada persona y su próximo cumpleaños (los nacidos el 29 de febrero lo celebran el 28 en años no bisiestos). Fechas calculadas en UTC por día para evitar saltos de horario. Arriba: próximo evento, eventos este mes y este año, y número de personas; filtro Todo / Cumpledías / Cumpleaños; lista de personas para añadir, editar o borrar. Al cambiar de día se recalcula sola.
+- **Contactos** (en el menú; antetítulo "Agenda y cumpledías"), con dos pestañas (la elegida se recuerda en `mp.ui.ctTab`; el botón principal es "Actualizar contactos" en Agenda y "Añadir persona" en Cumpledías):
+  - **Agenda:** contactos de Google con buscador (nombre sin tildes, teléfono o correo), filtro por categoría y Favoritos, y ficha de solo lectura (teléfonos con `tel:`, correos con `mailto:`, cumpleaños con edad, categorías, empresa, direcciones, notas y enlace a Google Contactos). Las **categorías de Google van separadas de las etiquetas de tareas**; su color sale del nombre (no se guarda).
+  - **Cumpledías:** personas añadidas a mano (colección `personas`: `{id, name, birth: 'AAAA-MM-DD'}`) más los contactos de Google con cumpleaños de las **categorías elegidas** en el panel "Contactos de Google en Cumpledías" (se guardan en la colección `ajustes`, registro `cumpledias`). Si un contacto se llama igual que una persona añadida a mano, no se repite. Un cumpleaños de Google sin año solo genera el cumpleaños (sin edad ni días de vida). Muestra, desde hoy incluido, los tres próximos múltiplos de 5.000 días de vida de cada persona y su próximo cumpleaños (los nacidos el 29 de febrero lo celebran el 28 en años no bisiestos). Fechas calculadas en UTC por día para evitar saltos de horario. Arriba: próximo evento, eventos este mes y este año, y número de personas; filtro Todo / Días de vida / Cumpleaños; lista de personas para añadir, editar o borrar. Al cambiar de día se recalcula sola.
 - **Vista de tablero** con las columnas de la fuente: secciones de Todoist, buckets de Planner. "Sin sección" solo aparece si tiene tareas o si no hay secciones.
 - **Las columnas son de solo lectura en la app.** Crear, renombrar, reordenar o borrar columnas se hace en el origen.
 - **Mover tarjetas entre columnas es crucial** y sí se escribe en el origen.
