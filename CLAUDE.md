@@ -39,7 +39,7 @@ Encima de las tareas de origen, la app añade su propia capa: **etiquetas con no
 | Clave | Contenido |
 |---|---|
 | `mp.todoist.token` | Token personal de Todoist |
-| `mp.todoist.cache` | Última copia de proyectos, secciones y tareas |
+| `mp.todoist.cache` | Última copia de proyectos, secciones, tareas y comentarios |
 | `mp.tags` | `{ list: [{id, name, color}], assign: { [taskId]: [tagId, ...] } }` |
 | `mp.ui` | Preferencias de interfaz (`sidebarHidden`, `projectId`) |
 
@@ -48,8 +48,8 @@ Las etiquetas viven solo en el navegador hasta la fase de OneDrive. En Ajustes h
 ## Integración con Todoist (hecha)
 
 - API v1, endpoint único `https://api.todoist.com/api/v1/sync`, autenticación `Authorization: Bearer <token>`, cuerpo `application/x-www-form-urlencoded`.
-- Lectura: `sync_token='*'` con `resource_types` `["user","projects","sections","items"]`. Se descartan tareas completadas, borradas y archivadas.
-- Escritura mediante `commands` (cada uno con `uuid` propio; `temp_id` al crear): `item_add`, `item_update` (renombrar), `item_move` (cambiar de sección; a "Sin sección" se mueve con `project_id`), `item_reorder`, `item_close` (completar; respeta tareas recurrentes), `item_uncomplete` (deshacer).
+- Lectura: `sync_token='*'` con `resource_types` `["user","projects","sections","items","notes"]`. Se descartan tareas completadas, borradas y archivadas, y los comentarios borrados o de tareas no activas.
+- Escritura mediante `commands` (cada uno con `uuid` propio; `temp_id` al crear): `item_add`, `item_update` (renombrar), `item_move` (cambiar de sección; a "Sin sección" se mueve con `project_id`), `item_reorder`, `item_close` (completar; respeta tareas recurrentes), `item_uncomplete` (deshacer), `note_add` / `note_update` / `note_delete` (comentarios).
 - Se comprueba `sync_status` de cada comando; si algo falla se muestra aviso y se vuelve a leer todo de Todoist.
 - Plan gratuito de Todoist: 5 proyectos, 20 secciones, 300 tareas activas. La API es gratuita.
 
@@ -67,6 +67,8 @@ Las etiquetas viven solo en el navegador hasta la fase de OneDrive. En Ajustes h
 - **Añadir/editar tarea:** panel sencillo con nombre y etiquetas. "Añadir tarea" al pie de cada columna crea en esa columna; el botón de la cabecera permite elegir columna.
 - **Menú lateral ocultable** (preferencia recordada por navegador). En pantallas medianas y pequeñas pasa a ser un panel flotante.
 - **Adaptable:** columnas que se reparten el ancho (mínimo 300 px), desplazamiento horizontal si no caben; en pantallas pequeñas una columna por pantalla con encaje al desplazar. En iPad, arrastrar tarjetas requiere mantener pulsado un instante.
+- **Comentarios de Todoist:** se ven en el panel de la tarea (del más antiguo al más reciente, texto plano con saltos de línea; los adjuntos como enlace). Se pueden añadir, editar y borrar, y se guardan en Todoist al momento, aparte del botón Guardar. No hay contador en la tarjeta.
+- La descripción de las tareas de Todoist no se muestra ni se edita.
 - Las subtareas de Todoist no se muestran por ahora.
 
 ## Estilo visual

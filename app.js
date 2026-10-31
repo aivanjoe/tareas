@@ -107,6 +107,7 @@
     plus: () => svg([{ d: 'M12 5v14M5 12h14' }]),
     close: () => svg([{ d: 'M6 6l12 12M18 6L6 18' }]),
     trash: () => svg([{ d: 'M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3' }]),
+    edit: () => svg([{ d: 'M4 20h4L19 9l-4-4L4 16v4zM13.5 6.5l4 4' }]),
     tag: () => svg([{ d: 'M20.6 13.4l-7.2 7.2a2 2 0 0 1-2.8 0L3 13V3h10l7.6 7.6a2 2 0 0 1 0 2.8z' }, { tag: 'circle', cx: '7.5', cy: '7.5', r: '1.5' }]),
     grip: () => svg([
       { tag: 'circle', cx: '8', cy: '5', r: '2' }, { tag: 'circle', cx: '16', cy: '5', r: '2' },
@@ -175,7 +176,7 @@
   async function fetchAll(token = S.token) {
     const r = await apiCall({
       sync_token: '*',
-      resource_types: JSON.stringify(['user', 'projects', 'sections', 'items'])
+      resource_types: JSON.stringify(['user', 'projects', 'sections', 'items', 'notes'])
     }, token);
     const projects = (r.projects || [])
       .filter(p => !p.is_deleted && !p.is_archived)
@@ -191,10 +192,23 @@
       child_order: i.child_order || 0,
       recurring: !!(i.due && i.due.is_recurring)
     }));
+    // Comentarios de tareas activas
+    const active = new Set(items.map(i => i.id));
+    const notes = (r.notes || []).filter(n => !n.is_deleted && active.has(n.item_id)).map(n => {
+      const f = n.file_attachment;
+      return {
+        id: n.id,
+        item_id: n.item_id,
+        content: n.content || '',
+        posted_at: n.posted_at || null,
+        file: f && /^https:\/\//.test(f.file_url || '') ? { name: f.file_name || 'Archivo adjunto', url: f.file_url } : null
+      };
+    });
     return {
       projects: projects.map(p => ({ id: p.id, name: p.name, inbox: !!p.inbox_project })),
       sections: sections.map(s => ({ id: s.id, name: s.name, project_id: s.project_id, order: s.section_order || 0 })),
       items,
+      notes,
       inboxId,
       syncedAt: Date.now()
     };
@@ -581,6 +595,8 @@
     };
     drawChips();
 
+    const commentsField = ed.mode === 'edit' && !ed.taskId.startsWith('tmp-') ? commentsSection(ed.taskId) : null;
+
     let columnField = null;
     if (ed.mode === 'new' && ed.fromHeader) {
       const sel = h('select', { class: 'select', id: 'taskColumn' },
@@ -604,6 +620,7 @@
         S.tags.list.length
           ? h('p', { class: 'hint' }, 'Pulsa una etiqueta para asignarla o quitarla.')
           : h('div', null, h('button', { type: 'button', class: 'btn ghost small', onclick: openTagManager }, 'Crear etiquetas'))),
+      commentsField,
       h('div', { class: 'drawer-foot' },
         ed.mode === 'edit'
           ? h('button', { type: 'button', class: 'btn ghost small', onclick: () => { const id = ed.taskId; closeDrawer(); completeTask(id); } }, 'Completar')
@@ -616,6 +633,119 @@
     drawer.hidden = false;
     document.getElementById('drawerScrim').hidden = false;
     setTimeout(() => nameInput.focus(), 50);
+  }
+
+  // ---------- comentarios (se guardan en Todoist al momento, aparte del botón Guardar) ----------
+  function notesOf(taskId) {
+    return (S.data.notes || []).filter(n => n.item_id === taskId)
+      .sort((a, b) => String(a.posted_at || '').localeCompare(String(b.posted_at || '')));
+  }
+
+  function noteDate(iso) {
+    const d = new Date(iso);
+    if (!iso || isNaN(d)) return '';
+    const opts = { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' };
+    if (d.getFullYear() !== new Date().getFullYear()) opts.year = 'numeric';
+    return d.toLocaleString('es-ES', opts);
+  }
+
+  function commentsSection(taskId) {
+    const box = h('div', { class: 'field' });
+    let editingId = null;
+    // Pinta el cambio optimista al momento y otra vez cuando responde Todoist
+    const run = p => { draw(); p.then(draw); };
+
+    // Atajos en los cuadros de texto: Ctrl/Cmd+Intro guarda, Escape cancela sin cerrar el panel
+    const keys = (area, onSave, onCancel) => area.addEventListener('keydown', e => {
+      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); onSave(); }
+      else if (e.key === 'Escape' && onCancel) { e.stopPropagation(); onCancel(); }
+    });
+
+    const draw = () => {
+      if (!box.isConnected && box.childElementCount) return;
+      const notes = notesOf(taskId);
+      const list = h('div', { class: 'notes' });
+      let focusArea = null;
+      for (const n of notes) {
+        const pending = n.id.startsWith('tmp-');
+        if (n.id === editingId) {
+          const area = h('textarea', { class: 'input textarea', rows: '3', 'aria-label': 'Editar comentario' });
+          area.value = n.content;
+          const save = () => run(updateNote(n, area.value));
+          const cancel = () => { editingId = null; draw(); };
+          keys(area, () => { editingId = null; save(); }, cancel);
+          list.append(h('div', { class: 'note' }, area,
+            h('div', { class: 'note-actions' },
+              h('button', { type: 'button', class: 'btn subtle small', onclick: cancel }, 'Cancelar'),
+              h('button', { type: 'button', class: 'btn primary small', onclick: () => { editingId = null; save(); } }, 'Guardar'))));
+          focusArea = area;
+          continue;
+        }
+        list.append(h('div', { class: 'note' + (pending ? ' pending' : '') },
+          h('div', { class: 'note-meta' },
+            h('span', null, pending ? 'Enviando…' : noteDate(n.posted_at)),
+            pending ? null : h('span', { class: 'note-tools' },
+              h('button', { type: 'button', class: 'icon-btn mini', 'aria-label': 'Editar comentario', onclick: () => { editingId = n.id; draw(); } }, ICON.edit()),
+              h('button', { type: 'button', class: 'icon-btn mini', 'aria-label': 'Borrar comentario', onclick: () => run(deleteNote(n)) }, ICON.trash()))),
+          n.content ? h('div', { class: 'note-text' }, n.content) : null,
+          n.file ? h('a', { class: 'note-file', href: n.file.url, target: '_blank', rel: 'noopener noreferrer' }, n.file.name) : null));
+      }
+
+      const area = h('textarea', { class: 'input textarea', rows: '2', placeholder: 'Escribe un comentario', 'aria-label': 'Nuevo comentario' });
+      const add = () => {
+        const text = area.value.trim();
+        if (!text) { area.focus(); return; }
+        run(addNote(taskId, text));
+      };
+      keys(area, add, null);
+
+      box.replaceChildren(
+        h('span', { class: 'field-label' }, 'Comentarios'),
+        notes.length ? list : null,
+        area,
+        h('div', { class: 'note-actions' },
+          h('span', { class: 'hint' }, 'Se guardan en Todoist al momento.'),
+          h('button', { type: 'button', class: 'btn ghost small', onclick: add }, 'Comentar')));
+      if (focusArea) {
+        focusArea.focus();
+        focusArea.setSelectionRange(focusArea.value.length, focusArea.value.length);
+      }
+    };
+    draw();
+    return box;
+  }
+
+  async function addNote(taskId, content) {
+    const tempId = 'tmp-' + uid();
+    const note = { id: tempId, item_id: taskId, content, posted_at: new Date().toISOString(), file: null };
+    S.data.notes = (S.data.notes || []).concat(note);
+    try {
+      const map = await runCommands([{ type: 'note_add', temp_id: tempId, uuid: uid(), args: { item_id: taskId, content } }]);
+      const realId = map[tempId];
+      if (!realId) throw new ApiError('command', 'Todoist no devolvió el identificador del comentario.');
+      note.id = realId;
+      saveCache();
+    } catch (e) {
+      S.data.notes = S.data.notes.filter(n => n.id !== tempId);
+      await recover(e);
+    }
+  }
+
+  async function updateNote(note, value) {
+    const content = value.trim();
+    if (!content || content === note.content) return;
+    note.content = content;
+    saveCache();
+    try { await runCommands([{ type: 'note_update', uuid: uid(), args: { id: note.id, content } }]); }
+    catch (e) { await recover(e); }
+  }
+
+  async function deleteNote(note) {
+    if (!confirm('¿Borrar este comentario? También se borrará en Todoist.')) return;
+    S.data.notes = S.data.notes.filter(n => n.id !== note.id);
+    saveCache();
+    try { await runCommands([{ type: 'note_delete', uuid: uid(), args: { id: note.id } }]); }
+    catch (e) { await recover(e); }
   }
 
   async function saveDrawer() {
