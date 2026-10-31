@@ -215,6 +215,7 @@
     close: () => svg([{ d: 'M6 6l12 12M18 6L6 18' }]),
     trash: () => svg([{ d: 'M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3' }]),
     edit: () => svg([{ d: 'M4 20h4L19 9l-4-4L4 16v4zM13.5 6.5l4 4' }]),
+    file: () => svg([{ d: 'M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z' }, { d: 'M14 3v5h5M9 13h6M9 17h4' }]),
     comment: () => svg([{ d: 'M20 11.5a7.5 7.5 0 0 1-10.9 6.7L4 19.5l1.3-4.6A7.5 7.5 0 1 1 20 11.5z' }]),
     tag: () => svg([{ d: 'M20.6 13.4l-7.2 7.2a2 2 0 0 1-2.8 0L3 13V3h10l7.6 7.6a2 2 0 0 1 0 2.8z' }, { tag: 'circle', cx: '7.5', cy: '7.5', r: '1.5' }]),
     grip: () => svg([
@@ -1498,7 +1499,8 @@
   const VIEWS = {
     personal: { title: 'Personal', add: 'Añadir tarea' },
     contactos: { title: 'Contactos', eyebrow: 'Cumpledías y cumpleaños', add: 'Añadir persona', el: 'viewContactos', render: () => renderCumpledias(), onAdd: () => openPerson(null) },
-    gastos: { title: 'Gastos', eyebrow: 'Pagos recurrentes', add: 'Nuevo gasto', el: 'viewGastos', render: () => renderGastos(), onAdd: () => openGasto(null) }
+    gastos: { title: 'Gastos', eyebrow: 'Pagos recurrentes', add: 'Nuevo gasto', el: 'viewGastos', render: () => renderGastos(), onAdd: () => openGasto(null) },
+    consumos: { title: 'Consumos', eyebrow: 'Luz, gas y agua', add: 'Subir facturas', el: 'viewConsumos', render: () => renderConsumos(), onAdd: () => pickFacturas() }
   };
 
   function applyView() {
@@ -2002,6 +2004,385 @@
         h('button', { type: 'button', class: 'btn subtle small', onclick: () => close() }, 'Cancelar'),
         h('button', { type: 'button', class: 'btn primary small', onclick: save }, 'Registrar pago')));
     close = openModal('Registrar pago', body);
+  }
+
+  // ---------- consumos: luz, gas y agua ----------
+  // Colección "consumos": un registro por factura, id "<tipo>-<fin>". Cada factura cuenta en el mes
+  // en que termina el consumo (anio/mes = mes de "fin"). Los PDF van a OneDrive: facturas/AAAA/<tipo>_<fin>.pdf
+  const TIPOS = {
+    luz: { nombre: 'Luz', unidad: 'kWh', campo: 'kwh', color: '#F5D76E' },
+    gas: { nombre: 'Gas', unidad: 'kWh', campo: 'kwh', color: '#F2B35B' },
+    agua: { nombre: 'Agua', unidad: 'm³', campo: 'm3', color: '#6FC3E8' }
+  };
+  const MESES_LARGOS = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre'];
+  let cTipo = 'luz';
+  let cMetric = 'coste'; // coste | consumo
+  let chartObj = null;
+  let chartLoading = null;
+  let pdfLoading = null;
+
+  const consumos = () => Object.values(S.datos.colecciones.consumos || {});
+  const fmtCant = (n, u) => n === null || n === undefined ? '—' : (Math.round(n * 100) / 100).toLocaleString('es-ES') + ' ' + u;
+  const cap = s => s.charAt(0).toUpperCase() + s.slice(1);
+
+  // ---- lectores de facturas (texto extraído con pdf.js; se quitan los espacios antes de buscar) ----
+  // Número en formato español: "1.234,56" -> 1234.56
+  function numEs(s) {
+    if (s === undefined || s === null) return null;
+    let t = String(s).trim();
+    if (t.includes(',')) t = t.replace(/\./g, '').replace(',', '.');
+    const n = parseFloat(t);
+    return isFinite(n) ? n : null;
+  }
+  const dmyToYmd = s => { const m = /^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/.exec(s || ''); if (!m) return null; const y = m[3].length === 2 ? '20' + m[3] : m[3]; return y + '-' + m[2].padStart(2, '0') + '-' + m[1].padStart(2, '0'); };
+  const grab = (re, t, i = 1) => { const m = re.exec(t); return m ? m[i] : undefined; };
+  // En los patrones, # es un número ("1.234,56")
+  const R = s => new RegExp(s.replace(/#/g, '([\\d.]+(?:,\\d+)?)'));
+
+  function parseFactura(text) {
+    const t = text.replace(/\s+/g, '');
+    const emision = dmyToYmd(grab(/Fechaemisiónfactura:?(\d{1,2}\/\d{1,2}\/\d{4})/, t) || grab(/FechaEmisión:?(\d{1,2}\/\d{1,2}\/\d{4})/, t));
+    let d = null;
+    if (/DATOSDELAFACTURADEELECTRICIDAD|INFORMACIÓNDELCONSUMOELÉCTRICO|RESUMENDELAFACTURADEELECTRICIDAD/.test(t)) {
+      const per = /del(\d{2}\/\d{2}\/\d{4})a(\d{2}\/\d{2}\/\d{4})/.exec(t);
+      d = { tipo: 'luz', inicio: per && dmyToYmd(per[1]), fin: per && dmyToYmd(per[2]),
+        kwh: numEs(grab(R('ConsumoTotal#kWh'), t)),
+        precioKwh: numEs(grab(R('Consumo#kWhx#Eur\\/kWh'), t, 2)),
+        costeEnergia: numEs(grab(R('FacturadeElectricidad#€'), t)),
+        costeServicios: numEs(grab(R('Facturadeservicios#€'), t)),
+        coste: numEs(grab(R('Totalimporteapagar#€'), t) || grab(R('TOTAL#€'), t)) };
+      // Formato antiguo sin factura de servicios: todo es energía
+      if (d.costeEnergia === null && d.costeServicios === null && !/FACTURADESERVICIOS/.test(t)) d.costeEnergia = d.coste;
+    } else if (/DATOSDELAFACTURADEGAS|RESUMENDELAFACTURADEGAS|INFORMACIÓNDELCONSUMOGAS|GASNATURA/.test(t)) {
+      const per = /del(\d{2}\/\d{2}\/\d{4})al(\d{2}\/\d{2}\/\d{4})/.exec(t);
+      d = { tipo: 'gas', inicio: per && dmyToYmd(per[1]), fin: per && dmyToYmd(per[2]),
+        kwh: numEs(grab(R('ConsumoTotal#kWh'), t)),
+        m3: numEs(grab(R('Consumo#m[³3]'), t)),
+        precioKwh: numEs(grab(R('TérminoEnergíaGas#kWhx#Eur\\/kWh'), t, 2)),
+        costeEnergia: numEs(grab(R('FacturadeGas#€'), t) || grab(R('TOTALIMPORTEFACTURADEGAS#€'), t) || grab(R('TOTALIMPORTEFACTURA#€'), t)),
+        costeServicios: numEs(grab(R('Facturadeservicios#€'), t)),
+        coste: numEs(grab(R('(?:Totalimporteapagar|TOTALAPAGAR)#€'), t)) };
+    } else if (/EMIVASA|FACTURASERVICIOSMEDIOAMBIENTALES/.test(t)) {
+      const per = /Lecturaanterior.*?Lecturaactual.*?(\d{2}\/\d{2}\/\d{4})(\d{2}\/\d{2}\/\d{4})/.exec(t);
+      const corto = /CUOTADECONSUMOAGUA(\d{2}\/\d{2}\/\d{2})-(\d{2}\/\d{2}\/\d{2})/.exec(t);
+      d = { tipo: 'agua', inicio: per ? dmyToYmd(per[1]) : corto && dmyToYmd(corto[1]), fin: per ? dmyToYmd(per[2]) : corto && dmyToYmd(corto[2]),
+        m3: numEs(grab(R('Consumo#m3'), t)),
+        precioM3: numEs(grab(R('CUOTADECONSUMOAGUA[\\d\\/-]+#M3x#€\\/M3'), t, 2)),
+        costeEnergia: numEs(grab(R('AGUAPOTABLESubtotal:#'), t)),
+        coste: numEs(grab(R('Totalfactura:?#€'), t) || grab(R('TotalFactura:?#€'), t)) };
+    }
+    if (!d) return null;
+    // Sin resumen de servicios: se suman las facturas de servicios detalladas
+    if (d.tipo !== 'agua' && d.costeServicios === null) {
+      const sv = [...t.matchAll(/DETALLEDELAFACTURADESERVICIOS.*?TOTALIMPORTEFACTURA([\d.]+(?:,\d+)?)€/g)].map(m => numEs(m[1]));
+      if (sv.length) d.costeServicios = Math.round(sv.reduce((a, b) => a + b, 0) * 100) / 100;
+    }
+    if (d.costeEnergia === null && d.coste !== null && d.costeServicios !== null) d.costeEnergia = Math.round((d.coste - d.costeServicios) * 100) / 100;
+    if (d.coste === null && (d.costeEnergia !== null || d.costeServicios !== null)) d.coste = Math.round(((d.costeEnergia || 0) + (d.costeServicios || 0)) * 100) / 100;
+    d.emision = emision;
+    return d;
+  }
+
+  // Librerías bajo demanda (incluidas en el repo): Chart.js para gráficos, pdf.js para leer facturas
+  function loadChart() {
+    if (window.Chart) return Promise.resolve();
+    if (!chartLoading) {
+      chartLoading = new Promise((resolve, reject) => {
+        const sc = document.createElement('script');
+        sc.src = 'chart.umd.min.js';
+        sc.onload = resolve;
+        sc.onerror = () => { chartLoading = null; reject(new Error('No se pudo cargar la librería de gráficos.')); };
+        document.head.append(sc);
+      });
+    }
+    return chartLoading;
+  }
+  function loadPdf() {
+    if (!pdfLoading) {
+      pdfLoading = import('./pdf.min.mjs').then(lib => {
+        lib.GlobalWorkerOptions.workerSrc = new URL('pdf.worker.min.mjs', location.href).href;
+        return lib;
+      });
+      pdfLoading.catch(() => { pdfLoading = null; });
+    }
+    return pdfLoading;
+  }
+  async function pdfText(file) {
+    const lib = await loadPdf();
+    const task = lib.getDocument({ data: new Uint8Array(await file.arrayBuffer()), isEvalSupported: false });
+    try {
+      const doc = await task.promise;
+      let out = '';
+      for (let i = 1; i <= doc.numPages; i++) {
+        const tc = await (await doc.getPage(i)).getTextContent();
+        for (const it of tc.items) out += it.str + (it.hasEOL ? '\n' : ' ');
+        out += '\n';
+      }
+      return out;
+    } finally {
+      task.destroy();
+    }
+  }
+
+  // Ficheros en la carpeta de la app de OneDrive
+  const graphPath = path => 'https://graph.microsoft.com/v1.0/me/drive/special/approot:/' + path.split('/').map(encodeURIComponent).join('/');
+  async function odPutFile(path, blob) {
+    const token = await odToken();
+    const r = await graphFetch(graphPath(path) + ':/content', { method: 'PUT', headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/pdf' }, body: blob });
+    if (r.status === 401) throw new OdError('login', 'La sesión de OneDrive ha caducado. Vuelve a conectar.');
+    if (!r.ok) throw new OdError('http', 'OneDrive no aceptó el fichero (' + r.status + ').');
+  }
+  async function odOpenFile(path) {
+    const w = window.open('', '_blank'); // se abre ya, con el clic, para que el navegador no la bloquee
+    try {
+      const token = await odToken();
+      const r = await graphFetch(graphPath(path), { headers: { Authorization: 'Bearer ' + token } });
+      if (r.status === 404) throw new OdError('http', 'La factura ya no está en OneDrive.');
+      if (!r.ok) throw new OdError('http', 'No se pudo abrir la factura (' + r.status + ').');
+      const url = (await r.json())['@microsoft.graph.downloadUrl'];
+      const blob = await (await graphFetch(url)).blob();
+      const obj = URL.createObjectURL(new Blob([blob], { type: 'application/pdf' }));
+      if (w) w.location.href = obj; else location.href = obj;
+      setTimeout(() => URL.revokeObjectURL(obj), 120000);
+    } catch (e) {
+      if (w) w.close();
+      if (e.kind === 'login') toast(e.message, 'error', { label: 'Conectar', fn: odConnect }, 10000);
+      else toast(e.message || 'No se pudo abrir la factura.', 'error');
+    }
+  }
+
+  function pickFacturas() {
+    const input = h('input', { type: 'file', accept: 'application/pdf,.pdf', multiple: true, hidden: true });
+    input.addEventListener('change', () => { const fs = [...input.files]; input.remove(); if (fs.length) uploadFacturas(fs); });
+    document.body.append(input);
+    input.click();
+  }
+
+  async function uploadFacturas(files) {
+    const nuevas = [], actualizadas = [], fallos = [];
+    let sinPdf = 0;
+    toast(files.length === 1 ? 'Leyendo la factura…' : 'Leyendo ' + files.length + ' facturas…');
+    for (const file of files) {
+      try {
+        if (file.size > 4 * 1024 * 1024) throw new Error('ocupa más de 4 MB');
+        const d = parseFactura(await pdfText(file));
+        if (!d || !d.fin) throw new Error('no se reconoce el formato');
+        const id = d.tipo + '-' + d.fin;
+        const prev = (S.datos.colecciones.consumos || {})[id];
+        const rec = Object.assign({ notas: '', factura: null }, prev, { id, tipo: d.tipo, anio: +d.fin.slice(0, 4), mes: +d.fin.slice(5, 7) });
+        for (const [k, v] of Object.entries(d)) if (k !== 'tipo' && v !== null && v !== undefined) rec[k] = v;
+        if (odConnected()) {
+          const path = 'facturas/' + rec.anio + '/' + d.tipo + '_' + d.fin + '.pdf';
+          try { await odPutFile(path, file); rec.factura = path; }
+          catch (e) { sinPdf++; if (e.kind === 'login') S.odState = 'login'; }
+        } else sinPdf++;
+        S.datos.colecciones.consumos = Object.assign({}, S.datos.colecciones.consumos, { [id]: rec });
+        (prev ? actualizadas : nuevas).push(rec);
+      } catch (e) {
+        fallos.push(file.name + ' (' + (e.message || 'error') + ')');
+      }
+    }
+    if (nuevas.length || actualizadas.length) saveDatos();
+    // Si todas las facturas son del mismo tipo, se muestra ese tipo
+    const tipos = new Set(nuevas.concat(actualizadas).map(r => r.tipo));
+    if (tipos.size === 1) cTipo = [...tipos][0];
+    renderConsumos();
+    const partes = [];
+    if (nuevas.length) partes.push(nuevas.length + (nuevas.length === 1 ? ' factura añadida' : ' facturas añadidas'));
+    if (actualizadas.length) partes.push(actualizadas.length + (actualizadas.length === 1 ? ' actualizada' : ' actualizadas'));
+    if (partes.length) toast(cap(partes.join(', ')) + '.');
+    if (sinPdf) toast(odConnected() ? 'No se pudieron guardar ' + sinPdf + ' PDF en OneDrive; los datos sí se han guardado.' : 'Datos guardados. Conecta OneDrive para guardar también los PDF.', 'error', null, 8000);
+    if (fallos.length) toast('No se pudieron leer: ' + fallos.slice(0, 3).join(', ') + (fallos.length > 3 ? ' y ' + (fallos.length - 3) + ' más' : '') + '.', 'error', null, 10000);
+  }
+
+  // Próxima factura: fecha por la duración habitual del periodo; importe por el mismo periodo del año
+  // pasado y por la media de las tres últimas
+  function estimate(list) {
+    const dated = list.filter(c => isYmd(c.fin)).sort((a, b) => a.fin.localeCompare(b.fin));
+    if (dated.length < 2) return null;
+    const last = dated[dated.length - 1];
+    const gaps = dated.slice(-6).map((c, i, a) => i ? (utcDay(c.fin) - utcDay(a[i - 1].fin)) / DAY : null).filter(Boolean).sort((a, b) => a - b);
+    const gap = gaps[Math.floor(gaps.length / 2)];
+    const next = utcDay(last.fin) + gap * DAY;
+    const yearAgo = next - 365 * DAY;
+    const prevYear = dated.filter(c => c.coste !== null && Math.abs(utcDay(c.fin) - yearAgo) <= Math.min(25, gap / 2) * DAY)
+      .sort((a, b) => Math.abs(utcDay(a.fin) - yearAgo) - Math.abs(utcDay(b.fin) - yearAgo))[0] || null;
+    const last3 = dated.filter(c => c.coste !== null).slice(-3);
+    const avg = last3.length ? last3.reduce((a, c) => a + c.coste, 0) / last3.length : null;
+    const value = prevYear && avg !== null ? (prevYear.coste + avg) / 2 : prevYear ? prevYear.coste : avg;
+    return { next, gap, prevYear, avg, n: last3.length, value };
+  }
+
+  function renderConsumos() {
+    const root = document.getElementById('viewConsumos');
+    root.dataset.day = String(todayUtc());
+    const all = consumos();
+    const byTipo = t => all.filter(c => c.tipo === t);
+    const latest = t => byTipo(t).filter(c => isYmd(c.fin)).sort((a, b) => b.fin.localeCompare(a.fin))[0] || null;
+
+    const cards = h('div', { class: 'stats three picks' }, Object.entries(TIPOS).map(([k, T]) => {
+      const l = latest(k);
+      return h('button', { type: 'button', class: 'stat pick' + (cTipo === k ? ' on' : ''), style: '--c:' + T.color, 'aria-pressed': cTipo === k ? 'true' : 'false', onclick: () => { cTipo = k; renderConsumos(); } },
+        h('span', { class: 'stat-label' }, T.nombre),
+        h('span', { class: 'stat-value' }, l && l.coste !== null ? fmtEur(l.coste) : '—'),
+        h('span', { class: 'stat-sub' }, l ? cap(MESES_LARGOS[l.mes - 1]) + ' ' + l.anio + (l[T.campo] !== null && l[T.campo] !== undefined ? ' · ' + fmtCant(l[T.campo], T.unidad) : '') : 'sin datos'));
+    }));
+
+    const T = TIPOS[cTipo];
+    const list = byTipo(cTipo);
+    const est = estimate(list);
+    const estPanel = est && est.value !== null ? h('section', { class: 'panel estimate' },
+      h('div', { class: 'est-main' },
+        h('span', { class: 'stat-label' }, 'Próxima factura (estimada)'),
+        h('span', { class: 'est-value' }, '≈ ' + fmtEur(est.value)),
+        h('span', { class: 'stat-sub' }, 'Consumo hasta ~' + fmtDay(est.next).replace(/ \d{4}$/, '') + ' · periodo habitual de ' + Math.round(est.gap) + ' días')),
+      h('div', { class: 'est-parts' },
+        h('span', null, 'Mismo periodo del año pasado: ', h('strong', null, est.prevYear ? fmtEur(est.prevYear.coste) : '—')),
+        h('span', null, 'Media de las ' + est.n + ' últimas: ', h('strong', null, est.avg !== null ? fmtEur(est.avg) : '—')))) : null;
+
+    // Gráfico: este año frente al anterior, por mes
+    const y = new Date(todayUtc()).getUTCFullYear();
+    const field = cMetric === 'coste' ? 'coste' : T.campo;
+    const serie = yr => Array.from({ length: 12 }, (_, m) => {
+      const vals = list.filter(c => c.anio === yr && c.mes === m + 1 && c[field] !== null && c[field] !== undefined).map(c => c[field]);
+      return vals.length ? Math.round(vals.reduce((a, b) => a + b, 0) * 100) / 100 : null;
+    });
+    const cur = serie(y), prev = serie(y - 1);
+    const hasData = cur.some(v => v !== null) || prev.some(v => v !== null);
+    const metricSeg = h('div', { class: 'seg', role: 'group', 'aria-label': 'Ver' },
+      [['coste', 'Coste'], ['consumo', 'Consumo']].map(([k, label]) => h('button', { type: 'button', class: cMetric === k ? 'on' : '', 'aria-pressed': cMetric === k ? 'true' : 'false', onclick: () => { cMetric = k; renderConsumos(); } }, label)));
+    const canvas = h('canvas', { 'aria-label': 'Gráfico de ' + T.nombre.toLowerCase() + ': ' + y + ' frente a ' + (y - 1) });
+    const chartPanel = h('section', { class: 'panel' },
+      h('div', { class: 'panel-head' }, h('h2', null, T.nombre + ' · ' + (y - 1) + ' y ' + y),
+        h('div', { class: 'legend' }, h('span', { class: 'lg prev' }, String(y - 1)), h('span', { class: 'lg cur', style: '--c:' + T.color }, String(y))),
+        metricSeg),
+      hasData ? h('div', { class: 'chart-box' }, canvas) : h('p', { class: 'muted empty-note' }, cMetric === 'coste' ? 'No hay importes de estos dos años.' : 'No hay datos de consumo de estos dos años.'));
+
+    // Historial
+    const rows = h('div', { class: 'ev-list' });
+    const sorted = list.slice().sort((a, b) => (b.fin || '').localeCompare(a.fin || '') || b.anio - a.anio || b.mes - a.mes);
+    for (const c of sorted) {
+      const periodo = isYmd(c.inicio) && isYmd(c.fin)
+        ? fmtDay(utcDay(c.inicio)).replace(/ \d{4}$/, '') + ' → ' + fmtDay(utcDay(c.fin)) + ' · ' + Math.round((utcDay(c.fin) - utcDay(c.inicio)) / DAY) + ' días'
+        : isYmd(c.fin) ? 'Hasta el ' + fmtDay(utcDay(c.fin)) : '';
+      const detalle = [];
+      if (c[T.campo] !== null && c[T.campo] !== undefined) detalle.push(fmtCant(c[T.campo], T.unidad));
+      const precio = cTipo === 'agua' ? c.precioM3 : c.precioKwh;
+      if (precio) detalle.push(precio.toLocaleString('es-ES', { maximumFractionDigits: 6 }) + ' €/' + T.unidad);
+      rows.append(h('div', { class: 'ev consumo' },
+        h('div', { class: 'ev-main' },
+          h('span', { class: 'ev-name' }, cap(MESES_LARGOS[c.mes - 1]) + ' ' + c.anio),
+          h('span', { class: 'ev-what' }, [periodo].concat(detalle).filter(Boolean).join(' · ') || '—')),
+        h('span', { class: 'ev-amount' }, c.coste !== null && c.coste !== undefined ? fmtEur(c.coste) : '—'),
+        h('div', { class: 'row-tools' },
+          c.factura ? h('button', { type: 'button', class: 'icon-btn mini', 'aria-label': 'Ver factura', title: 'Ver factura', onclick: () => { if (!odConnected()) return toast('Conecta OneDrive para ver la factura.', 'error'); odOpenFile(c.factura); } }, ICON.file()) : null,
+          h('button', { type: 'button', class: 'icon-btn mini', 'aria-label': 'Editar', title: 'Editar', onclick: () => openConsumo(c.id) }, ICON.edit()),
+          h('button', {
+            type: 'button', class: 'icon-btn mini', 'aria-label': 'Borrar', title: 'Borrar',
+            onclick: () => {
+              if (!confirm('¿Borrar el registro de ' + T.nombre.toLowerCase() + ' de ' + MESES_LARGOS[c.mes - 1] + ' de ' + c.anio + '?' + (c.factura ? ' El PDF se queda en OneDrive.' : ''))) return;
+              const rest = Object.assign({}, S.datos.colecciones.consumos);
+              delete rest[c.id];
+              S.datos.colecciones.consumos = rest;
+              saveDatos();
+              renderConsumos();
+            }
+          }, ICON.trash()))));
+    }
+    if (!sorted.length) rows.append(h('p', { class: 'muted empty-note' }, 'Sube tus facturas en PDF o añade un consumo a mano.'));
+
+    const toolbar = h('div', { class: 'g-toolbar' }, h('span'),
+      h('div', { class: 'row-actions' },
+        h('button', { type: 'button', class: 'btn ghost small', onclick: () => openConsumo(null) }, ICON.plus(), 'Añadir a mano'),
+        h('button', { type: 'button', class: 'btn ghost small', onclick: pickFacturas }, ICON.file(), 'Subir facturas')));
+
+    root.replaceChildren(...[cards, estPanel, chartPanel,
+      h('section', { class: 'panel' }, h('div', { class: 'panel-head' }, h('h2', null, 'Historial · ' + T.nombre), toolbar), rows)].filter(Boolean));
+
+    if (chartObj) { chartObj.destroy(); chartObj = null; }
+    if (hasData) {
+      loadChart().then(() => {
+        if (!canvas.isConnected) return;
+        const unit = cMetric === 'coste' ? '€' : T.unidad;
+        const fmt = v => cMetric === 'coste' ? fmtEur(v) : fmtCant(v, unit);
+        chartObj = new Chart(canvas, {
+          type: 'bar',
+          data: { labels: MESES_CORTOS, datasets: [
+            { label: String(y - 1), data: prev, backgroundColor: 'rgba(154, 164, 181, 0.32)', borderRadius: 4 },
+            { label: String(y), data: cur, backgroundColor: T.color, borderRadius: 4 }
+          ] },
+          options: {
+            responsive: true, maintainAspectRatio: false, animation: false,
+            interaction: { mode: 'index', intersect: false },
+            plugins: { legend: { display: false }, tooltip: { callbacks: { label: ctx => ctx.dataset.label + ': ' + (ctx.raw === null ? '—' : fmt(ctx.raw)) } } },
+            scales: {
+              x: { ticks: { color: '#8A94A6', font: { family: 'Manrope', size: 11 } }, grid: { display: false }, border: { display: false } },
+              y: { beginAtZero: true, ticks: { color: '#8A94A6', font: { family: 'Manrope', size: 11 }, maxTicksLimit: 5, callback: v => cMetric === 'coste' ? v + ' €' : v }, grid: { color: 'rgba(255, 255, 255, 0.06)' }, border: { display: false } }
+            }
+          }
+        });
+      }).catch(e => toast(e.message, 'error'));
+    }
+  }
+
+  function openConsumo(id) {
+    const cur = id ? (S.datos.colecciones.consumos || {})[id] : null;
+    const st = { tipo: cur ? cur.tipo : cTipo };
+    const inp = (idAttr, attrs) => h('input', Object.assign({ class: 'input', id: idAttr, autocomplete: 'off' }, attrs));
+    const fin = inp('cFin', { type: 'date', value: cur && isYmd(cur.fin) ? cur.fin : '' });
+    const inicio = inp('cInicio', { type: 'date', value: cur && isYmd(cur.inicio) ? cur.inicio : '' });
+    const coste = inp('cCoste', { type: 'text', inputmode: 'decimal', placeholder: '0,00', value: cur && cur.coste !== null && cur.coste !== undefined ? fmtNumInput(cur.coste) : '' });
+    const cantidad = inp('cCantidad', { type: 'text', inputmode: 'decimal', placeholder: 'Opcional' });
+    const notas = inp('cNotas', { type: 'text', maxlength: '200', placeholder: 'Opcional', value: cur ? cur.notas || '' : '' });
+    const cantLabel = h('label', { class: 'field-label', for: 'cCantidad' });
+    const setCant = () => {
+      const T = TIPOS[st.tipo];
+      cantLabel.textContent = 'Consumo (' + T.unidad + ')';
+      const v = cur && cur.tipo === st.tipo ? cur[T.campo] : null;
+      cantidad.value = v !== null && v !== undefined ? String(v).replace('.', ',') : '';
+    };
+    const seg = h('div', { class: 'seg' });
+    const drawSeg = () => seg.replaceChildren(...Object.entries(TIPOS).map(([k, T]) => h('button', {
+      type: 'button', class: st.tipo === k ? 'on' : '', 'aria-pressed': st.tipo === k ? 'true' : 'false',
+      onclick: () => { st.tipo = k; drawSeg(); setCant(); }
+    }, T.nombre)));
+    drawSeg(); setCant();
+    let close = null;
+    const save = () => {
+      if (!isYmd(fin.value)) { toast('Pon la fecha en que termina el consumo.', 'error'); fin.focus(); return; }
+      if (inicio.value && (!isYmd(inicio.value) || inicio.value >= fin.value)) { toast('El inicio debe ser anterior al fin.', 'error'); inicio.focus(); return; }
+      const c = coste.value.trim() ? parseAmount(coste.value) : null;
+      const q = cantidad.value.trim() ? parseAmount(cantidad.value) : null;
+      if (Number.isNaN(c) || Number.isNaN(q)) { toast('Revisa los números.', 'error'); return; }
+      const newId = st.tipo + '-' + fin.value;
+      const cols = Object.assign({}, S.datos.colecciones.consumos);
+      if (newId !== (cur && cur.id) && cols[newId] && !confirm('Ya hay un registro de ' + TIPOS[st.tipo].nombre.toLowerCase() + ' que termina ese día. ¿Sustituirlo?')) return;
+      if (cur && cur.id !== newId) delete cols[cur.id];
+      const T = TIPOS[st.tipo];
+      const rec = Object.assign({ kwh: null, m3: null, costeEnergia: null, costeServicios: null, precioKwh: null, precioM3: null, factura: null }, cur && cur.tipo === st.tipo ? cur : {}, {
+        id: newId, tipo: st.tipo, anio: +fin.value.slice(0, 4), mes: +fin.value.slice(5, 7),
+        inicio: inicio.value || null, fin: fin.value, coste: c, notas: notas.value.trim()
+      });
+      rec[T.campo] = q;
+      cols[newId] = rec;
+      S.datos.colecciones.consumos = cols;
+      saveDatos();
+      cTipo = st.tipo;
+      close();
+      renderConsumos();
+    };
+    const fld = (label, forId, el) => h('div', { class: 'field' }, h('label', { class: 'field-label', for: forId }, label), el);
+    const body = h('div', { class: 'form' },
+      h('div', { class: 'field' }, h('span', { class: 'field-label' }, 'Tipo'), seg),
+      h('div', { class: 'form-row' }, fld('Inicio del consumo', 'cInicio', inicio), fld('Fin del consumo', 'cFin', fin)),
+      h('p', { class: 'hint' }, 'El registro cuenta en el mes en que termina el consumo.'),
+      h('div', { class: 'form-row' }, fld('Importe total (€)', 'cCoste', coste), h('div', { class: 'field' }, cantLabel, cantidad)),
+      fld('Notas', 'cNotas', notas),
+      h('div', { class: 'row-actions modal-foot' },
+        h('span', { class: 'spacer' }),
+        h('button', { type: 'button', class: 'btn subtle small', onclick: () => close() }, 'Cancelar'),
+        h('button', { type: 'button', class: 'btn primary small', onclick: save }, cur ? 'Guardar' : 'Añadir')));
+    close = openModal(cur ? 'Editar consumo' : 'Añadir consumo', body);
   }
 
   // ---------- menú lateral ----------

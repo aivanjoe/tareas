@@ -5,12 +5,12 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#0B0F15">
   <title>Mi panel</title>
-  <link rel="icon" type="image/svg+xml" href="favicon.svg?v=17">
-  <link rel="apple-touch-icon" href="apple-touch-icon.png?v=17">
+  <link rel="icon" type="image/svg+xml" href="favicon.svg?v=18">
+  <link rel="apple-touch-icon" href="apple-touch-icon.png?v=18">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="styles.css?v=17">
+  <link rel="stylesheet" href="styles.css?v=18">
 </head>
 <body>
   <div class="app" id="app">
@@ -42,6 +42,10 @@
         <a href="#" class="nav-item" data-view="gastos">
           <svg viewBox="0 0 24 24"><path d="M19 7V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-3"/><path d="M3 6a1 1 0 0 0 1 1h16a1 1 0 0 1 1 1v4h-4a2 2 0 0 0 0 4h4"/></svg>
           <span class="nav-label">Gastos</span>
+        </a>
+        <a href="#" class="nav-item" data-view="consumos">
+          <svg viewBox="0 0 24 24"><path d="M13 3L5 14h6l-1 7 8-11h-6l1-7z"/></svg>
+          <span class="nav-label">Consumos</span>
         </a>
       </nav>
 
@@ -105,6 +109,7 @@
 
       <section class="view" id="viewContactos" aria-label="Contactos" hidden></section>
       <section class="view" id="viewGastos" aria-label="Gastos" hidden></section>
+      <section class="view" id="viewConsumos" aria-label="Consumos" hidden></section>
     </main>
   </div>
 
@@ -115,6 +120,6 @@
   <div class="toasts" id="toasts" aria-live="polite"></div>
 
   <script src="Sortable.min.js"></script>
-  <script src="app.js?v=17"></script>
+  <script src="app.js?v=18"></script>
 </body>
 </html>
