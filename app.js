@@ -1348,7 +1348,7 @@
     const evs = items.filter(e => e.status !== 'cancelled').map(e => ({
       id: e.id, title: e.summary || '(sin título)', allDay: !!(e.start && e.start.date),
       start: (e.start && (e.start.date || e.start.dateTime)) || '', end: (e.end && (e.end.date || e.end.dateTime)) || '',
-      key: ((e.extendedProperties || {}).private || {}).mpKey || '', link: e.htmlLink || ''
+      key: ((e.extendedProperties || {}).private || {}).mpKey || '', link: e.htmlLink || '', serie: e.recurringEventId || ''
     }));
     // Se sustituye lo leído en ese intervalo y se conserva el resto
     const inRange = e => e.start.slice(0, 10) >= fromYmd && e.start.slice(0, 10) < toYmd;
@@ -2481,7 +2481,7 @@
   const VIEWS = {
     personal: { title: 'Personal', add: 'Añadir tarea', board: 'Todoist' },
     trabajo: { title: 'Trabajo', add: 'Añadir tarea', board: 'Planner' },
-    calendario: { title: 'Calendario', eyebrow: () => calCfg() ? calCfg().nombre : 'Google Calendar', add: 'Hoy', addIcon: 'calendar', el: 'viewCalendario', render: () => renderCal(), onAdd: () => { calMonth = null; calSel = null; renderCal(); } },
+    calendario: { title: 'Calendario', eyebrow: () => calCfg() ? calCfg().nombre : 'Google Calendar', add: 'Nuevo evento', el: 'viewCalendario', render: () => renderCal(), onAdd: () => openCalEvent(null) },
     contactos: { title: 'Contactos', eyebrow: 'Agenda y cumples', add: () => ctTab() === 'agenda' ? 'Nuevo contacto' : 'Elegir contactos', el: 'viewContactos', render: () => renderCumpledias(), onAdd: () => ctTab() === 'agenda' ? openEditContacto(null) : openCdPicker() },
     gastos: { title: 'Gastos', eyebrow: 'Pagos recurrentes', add: 'Nuevo gasto', el: 'viewGastos', render: () => renderGastos(), onAdd: () => openGasto(null) },
     consumos: { title: 'Consumos', eyebrow: 'Luz, gas y agua', add: 'Subir facturas', el: 'viewConsumos', render: () => renderConsumos(), onAdd: () => pickFacturas() }
@@ -2572,9 +2572,10 @@
       h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Mes anterior', onclick: () => { calMonth = Date.UTC(Y, M - 1, 1); renderCal(); } }, ICON.left()),
       h('h2', null, cap(new Date(calMonth).toLocaleDateString('es-ES', { month: 'long', year: 'numeric', timeZone: 'UTC' }))),
       h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Mes siguiente', onclick: () => { calMonth = Date.UTC(Y, M + 1, 1); renderCal(); } }, ICON.right()),
+      h('button', { type: 'button', class: 'btn subtle small', onclick: () => { calMonth = null; calSel = null; renderCal(); } }, 'Hoy'),
       calLoading ? h('span', { class: 'muted' }, 'Leyendo…') : null,
       h('div', { class: 'legend cal-legend' },
-        h('span', { class: 'lg', style: '--c:#E68AC4' }, 'Cumpleaños'), h('span', { class: 'lg', style: '--c:#F2B35B' }, 'Cumpledías'),
+        h('span', { class: 'lg', style: '--c:#E68AC4' }, 'Cumpleaños'), h('span', { class: 'lg', style: '--c:#F2B35B' }, 'Cumpledías'), h('span', { class: 'lg', style: '--c:' + SANTO_COLOR }, 'Santos'),
         h('span', { class: 'lg', style: '--c:#F5D76E' }, 'Gastos'), h('span', { class: 'lg', style: '--c:#DBF266' }, 'Tareas')));
 
     const grid = h('div', { class: 'cal-grid' }, DIAS_SEM.map(d => h('span', { class: 'cal-wd' }, d)));
@@ -2597,14 +2598,142 @@
     }
 
     const dayEvs = S.cal.events.filter(e => evOnDay(e, calSel)).sort((a, b) => (a.allDay === b.allDay ? a.start.localeCompare(b.start) : a.allDay ? -1 : 1));
-    const list = h('div', { class: 'ev-list' }, dayEvs.map(e => h('a', { class: 'ev cal-item', href: e.link || '#', target: '_blank', rel: 'noopener noreferrer' },
-      h('span', { class: 'cat-dot', style: '--c:' + evColor(e) }),
-      h('span', { class: 'ev-main' }, h('span', { class: 'ev-name' }, e.title), h('span', { class: 'ev-what' }, [evTime(e), evOrigin(e) ? 'creado por la app (' + evOrigin(e).toLowerCase() + ')' : ''].filter(Boolean).join(' · '))))));
+    const evInner = e => [h('span', { class: 'cat-dot', style: '--c:' + evColor(e) }),
+      h('span', { class: 'ev-main' }, h('span', { class: 'ev-name' }, e.title), h('span', { class: 'ev-what' },
+        [evTime(e), e.serie && !e.key ? 'se repite' : '', evOrigin(e) ? 'lo gestiona la app (' + evOrigin(e).toLowerCase() + ')' : ''].filter(Boolean).join(' · ')))];
+    const list = h('div', { class: 'ev-list' }, dayEvs.map(e => e.key
+      ? h('a', { class: 'ev cal-item', href: e.link || '#', target: '_blank', rel: 'noopener noreferrer', title: 'Lo gestiona la app: se cambia desde su pantalla' }, ...evInner(e))
+      : h('button', { type: 'button', class: 'ev cal-item cal-own', onclick: () => openCalEvent(e) }, ...evInner(e))));
     if (!dayEvs.length) list.append(h('p', { class: 'muted empty-note' }, 'Sin eventos este día.'));
 
     root.replaceChildren(
       h('section', { class: 'panel' }, nav, grid),
       h('section', { class: 'panel' }, h('div', { class: 'panel-head' }, h('h2', null, cap(new Date(utcDay(calSel)).toLocaleDateString('es-ES', { weekday: 'long', day: 'numeric', month: 'long', timeZone: 'UTC' })))), list));
+  }
+
+  // ---- eventos propios del usuario (sin la marca de la app: la puesta al día nunca los toca) ----
+  const REPETIR = [['', 'No se repite'], ['RRULE:FREQ=WEEKLY', 'Cada semana'], ['RRULE:FREQ=MONTHLY', 'Cada mes'], ['RRULE:FREQ=YEARLY', 'Cada año']];
+  const localTz = () => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || 'Europe/Madrid'; } catch (e) { return 'Europe/Madrid'; } };
+  // Crear (ev = null) o editar un evento del calendario. Los repetidos se editan como serie.
+  async function openCalEvent(ev) {
+    if (!calReady()) { toast('Elige antes un calendario en Ajustes.', 'error'); return; }
+    if (!ggTokenOk()) { toast('El permiso de Google ha caducado.', 'error', { label: 'Reconectar', fn: ggLogin }, 10000); return; }
+    const cid = encodeURIComponent(calCfg().calendarId);
+    let src = null;
+    if (ev) {
+      try { src = await ggGet(CALAPI + 'calendars/' + cid + '/events/' + encodeURIComponent(ev.serie || ev.id)); }
+      catch (e) { toast(e.message || 'No se pudo leer el evento.', 'error'); return; }
+      if (((src.extendedProperties || {}).private || {}).mpApp === '1') { toast('Este evento lo gestiona la app: se cambia desde su pantalla.', 'error'); return; }
+    }
+    const tz = (src && src.start && src.start.timeZone) || localTz();
+    const allDay0 = src ? !!src.start.date : true;
+    // Fecha y hora locales de un dateTime de Google
+    const partes = dt => { const d = new Date(dt); return { ymd: localYmd(d), hm: String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0') }; };
+    const ini = src ? (src.start.date ? { ymd: src.start.date, hm: '' } : partes(src.start.dateTime)) : { ymd: calSel || ymdOf(todayUtc()), hm: '' };
+    const fin = src ? (src.end.date ? { ymd: src.end.date, hm: '' } : partes(src.end.dateTime)) : null;
+    // Días que dura un evento de todo el día (se conservan al cambiar la fecha)
+    const span = src && src.start.date && src.end.date ? Math.max(1, Math.round((utcDay(src.end.date) - utcDay(src.start.date)) / DAY)) : 1;
+    const rec0 = src && src.recurrence ? src.recurrence.join('\n') : '';
+    const opts = REPETIR.slice();
+    if (rec0 && !opts.some(o => o[0] === rec0)) opts.push([rec0, 'Personalizada (como está en Google)']);
+
+    const titulo = h('input', { class: 'input', type: 'text', maxlength: '200', 'aria-label': 'Título', placeholder: 'Título', autocomplete: 'off' });
+    titulo.value = src ? src.summary || '' : '';
+    const fecha = h('input', { class: 'input', type: 'date', 'aria-label': 'Fecha' });
+    fecha.value = ini.ymd;
+    const todo = h('input', { type: 'checkbox', id: 'ceTodo', checked: allDay0 });
+    const hIni = h('input', { class: 'input', type: 'time', 'aria-label': 'Hora de inicio' });
+    const hFin = h('input', { class: 'input', type: 'time', 'aria-label': 'Hora de fin' });
+    hIni.value = ini.hm || '10:00';
+    hFin.value = fin && fin.hm ? fin.hm : '11:00';
+    const horas = h('div', { class: 'form-row' },
+      h('div', { class: 'field' }, h('span', { class: 'field-label' }, 'Desde'), hIni),
+      h('div', { class: 'field' }, h('span', { class: 'field-label' }, 'Hasta'), hFin));
+    const pintaHoras = () => { horas.hidden = todo.checked; };
+    todo.addEventListener('change', pintaHoras);
+    pintaHoras();
+    // Al cambiar la hora de inicio, la de fin se mueve con ella
+    let prevIni = hIni.value;
+    hIni.addEventListener('change', () => {
+      const toMin = v => +v.slice(0, 2) * 60 + +v.slice(3, 5);
+      if (/^\d{2}:\d{2}$/.test(prevIni) && /^\d{2}:\d{2}$/.test(hIni.value) && /^\d{2}:\d{2}$/.test(hFin.value)) {
+        const m = (toMin(hFin.value) + toMin(hIni.value) - toMin(prevIni) + 1440) % 1440;
+        hFin.value = String(Math.floor(m / 60)).padStart(2, '0') + ':' + String(m % 60).padStart(2, '0');
+      }
+      prevIni = hIni.value;
+    });
+    const repetir = h('select', { class: 'select', 'aria-label': 'Repetir' }, opts.map(([v, l]) => h('option', { value: v }, l)));
+    repetir.value = rec0;
+    const notas = h('textarea', { class: 'input textarea', rows: '3', 'aria-label': 'Notas' });
+    notas.value = src ? src.description || '' : '';
+
+    let close = null;
+    const saveBtn = h('button', { type: 'button', class: 'btn primary small' }, ev ? 'Guardar' : 'Crear evento');
+    const tras = async msg => {
+      close();
+      toast(msg);
+      try { await calFetch(S.cal.from || ymdOf(todayUtc()), S.cal.to || addDays(ymdOf(todayUtc()), 400)); } catch (e) { /* se verá al sincronizar */ }
+      if (S.ui.view === 'calendario') renderCal();
+    };
+    const fallo = e => {
+      if (e.kind === 'login') toast(e.message, 'error', { label: 'Reconectar', fn: ggLogin }, 10000);
+      else if (e.kind === 'scope') toast(e.message, 'error', { label: 'Dar permiso', fn: () => ggLogin(true) }, 15000);
+      else toast(e.message || 'Google Calendar no ha aceptado el cambio.', 'error', null, 10000);
+    };
+    saveBtn.addEventListener('click', async () => {
+      const t = titulo.value.trim(), f = fecha.value;
+      if (!t) { toast('Escribe el título.', 'error'); titulo.focus(); return; }
+      if (!isYmd(f)) { toast('Elige la fecha.', 'error'); return; }
+      const body = { summary: t, description: notas.value.trim() };
+      if (todo.checked) {
+        body.start = { date: f, dateTime: null, timeZone: null };
+        body.end = { date: addDays(f, span), dateTime: null, timeZone: null };
+      } else {
+        if (!/^\d{2}:\d{2}$/.test(hIni.value) || !/^\d{2}:\d{2}$/.test(hFin.value)) { toast('Pon la hora de inicio y de fin.', 'error'); return; }
+        const fFin = hFin.value <= hIni.value ? addDays(f, 1) : f; // si acaba antes de empezar, es al día siguiente
+        body.start = { dateTime: f + 'T' + hIni.value + ':00', timeZone: tz, date: null };
+        body.end = { dateTime: fFin + 'T' + hFin.value + ':00', timeZone: tz, date: null };
+      }
+      body.recurrence = repetir.value ? repetir.value.split('\n') : [];
+      saveBtn.disabled = true;
+      saveBtn.textContent = 'Guardando…';
+      try {
+        if (src) await ggCall('PATCH', CALAPI + 'calendars/' + cid + '/events/' + encodeURIComponent(src.id), body);
+        else {
+          for (const k of ['start', 'end']) for (const x of Object.keys(body[k])) if (body[k][x] === null) delete body[k][x];
+          if (!body.recurrence.length) delete body.recurrence;
+          await ggCall('POST', CALAPI + 'calendars/' + cid + '/events', Object.assign(body, { reminders: { useDefault: true } }));
+        }
+        await tras(src ? 'Evento guardado en Google Calendar' : 'Evento creado en Google Calendar');
+      } catch (e) {
+        saveBtn.disabled = false;
+        saveBtn.textContent = ev ? 'Guardar' : 'Crear evento';
+        fallo(e);
+      }
+    });
+    const borrar = async (id, pregunta, msg) => {
+      if (!confirm(pregunta)) return;
+      try { await ggCall('DELETE', CALAPI + 'calendars/' + cid + '/events/' + encodeURIComponent(id)); await tras(msg); }
+      catch (e) { fallo(e); }
+    };
+    const serie = !!(ev && ev.serie);
+    const fld = (label, ...els) => h('div', { class: 'field' }, h('span', { class: 'field-label' }, label), ...els);
+    const body = h('div', { class: 'form' },
+      fld('Título', titulo),
+      h('div', { class: 'form-row' }, fld('Fecha', fecha), fld('Repetir', repetir)),
+      h('label', { class: 'check-line', for: 'ceTodo' }, todo, 'Todo el día'),
+      horas,
+      fld('Notas', notas),
+      serie ? h('p', { class: 'hint' }, 'Se repite: los cambios se aplican a toda la serie.') : null,
+      h('div', { class: 'row-actions modal-foot' },
+        ev && serie ? h('button', { type: 'button', class: 'btn danger small', onclick: () => borrar(ev.id, '¿Borrar solo el evento de este día?', 'Borrado el evento de ese día') }, 'Borrar este día') : null,
+        ev ? h('button', { type: 'button', class: 'btn danger small', onclick: () => borrar(src.id, serie ? '¿Borrar toda la serie? Se puede recuperar desde la papelera de Google Calendar (30 días).' : '¿Borrar este evento? Se puede recuperar desde la papelera de Google Calendar (30 días).', 'Evento borrado') }, serie ? 'Borrar la serie' : 'Borrar') : null,
+        ev && src.htmlLink ? h('a', { class: 'btn subtle small', href: src.htmlLink, target: '_blank', rel: 'noopener noreferrer' }, 'Abrir en Google') : null,
+        h('span', { class: 'spacer' }),
+        h('button', { type: 'button', class: 'btn subtle small', onclick: () => close() }, 'Cancelar'),
+        saveBtn));
+    close = openModal(ev ? 'Editar evento' : 'Nuevo evento', body);
+    if (!ev) setTimeout(() => titulo.focus(), 50);
   }
 
   // Elegir el calendario de Google (se guarda en el almacén: vale para todos los dispositivos)

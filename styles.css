@@ -569,3 +569,7 @@ a.btn { text-decoration: none; }
 .santo-row .ev-what { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .santo-gen { display: grid; grid-template-columns: 110px minmax(0, 1fr); gap: 10px; align-items: center; }
 .date-parts.two { grid-template-columns: 70px minmax(0, 1fr); }
+
+/* Eventos propios en la lista del día: se pueden pulsar para editarlos */
+.ev.cal-own { width: 100%; text-align: left; font: inherit; color: inherit; cursor: pointer; }
+.ev.cal-own:hover { background: var(--card-hi); }
