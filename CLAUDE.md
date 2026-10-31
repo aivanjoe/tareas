@@ -67,7 +67,7 @@ Las etiquetas viven solo en el navegador hasta la fase de OneDrive. En Ajustes h
 - **Añadir/editar tarea:** panel sencillo con nombre y etiquetas. "Añadir tarea" al pie de cada columna crea en esa columna; el botón de la cabecera permite elegir columna.
 - **Menú lateral ocultable** (preferencia recordada por navegador). En pantallas medianas y pequeñas pasa a ser un panel flotante.
 - **Adaptable:** columnas que se reparten el ancho (mínimo 300 px), desplazamiento horizontal si no caben; en pantallas pequeñas una columna por pantalla con encaje al desplazar. En iPad, arrastrar tarjetas requiere mantener pulsado un instante.
-- **Comentarios de Todoist:** se ven en el panel de la tarea (del más antiguo al más reciente, texto plano con saltos de línea; los adjuntos como enlace). Se pueden añadir, editar y borrar, y se guardan en Todoist al momento, aparte del botón Guardar. No hay contador en la tarjeta.
+- **Comentarios de Todoist:** se ven en el panel de la tarea (del más antiguo al más reciente, texto plano con saltos de línea; los adjuntos como enlace). Se pueden añadir, editar y borrar, y se guardan en Todoist al momento, aparte del botón Guardar. Si una tarea tiene comentarios, su tarjeta muestra un icono de bocadillo a la derecha del nombre (sin número).
 - La descripción de las tareas de Todoist no se muestra ni se edita.
 - Las subtareas de Todoist no se muestran por ahora.
 

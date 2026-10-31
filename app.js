@@ -108,6 +108,7 @@
     close: () => svg([{ d: 'M6 6l12 12M18 6L6 18' }]),
     trash: () => svg([{ d: 'M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3' }]),
     edit: () => svg([{ d: 'M4 20h4L19 9l-4-4L4 16v4zM13.5 6.5l4 4' }]),
+    comment: () => svg([{ d: 'M20 11.5a7.5 7.5 0 0 1-10.9 6.7L4 19.5l1.3-4.6A7.5 7.5 0 1 1 20 11.5z' }]),
     tag: () => svg([{ d: 'M20.6 13.4l-7.2 7.2a2 2 0 0 1-2.8 0L3 13V3h10l7.6 7.6a2 2 0 0 1 0 2.8z' }, { tag: 'circle', cx: '7.5', cy: '7.5', r: '1.5' }]),
     grip: () => svg([
       { tag: 'circle', cx: '8', cy: '5', r: '2' }, { tag: 'circle', cx: '16', cy: '5', r: '2' },
@@ -388,8 +389,9 @@
   function renderCard(item) {
     const tags = assigned(item.id).map(tagById);
     const pending = item.id.startsWith('tmp-');
+    const hasNotes = (S.data.notes || []).some(n => n.item_id === item.id);
     return h('div', {
-      class: 'card' + (pending ? ' pending' : ''),
+      class: 'card' + (pending ? ' pending' : '') + (hasNotes ? ' has-notes' : ''),
       dataset: { taskId: item.id },
       style: '--strip:' + (tags[0] ? tags[0].color : 'transparent')
     },
@@ -401,6 +403,7 @@
         type: 'button', class: 'card-title', title: cleanTitle(item.content),
         onclick: () => { if (!pending) openEdit(item.id); }
       }, cleanTitle(item.content)),
+      hasNotes ? h('span', { class: 'card-notes', title: 'Tiene comentarios', 'aria-label': 'Tiene comentarios' }, ICON.comment()) : null,
       tags.length ? h('span', { class: 'card-tags' },
         tags.map(t => h('span', { class: 'mini-tag', style: '--c:' + t.color }, t.name))) : null
     );
@@ -653,7 +656,7 @@
     const box = h('div', { class: 'field' });
     let editingId = null;
     // Pinta el cambio optimista al momento y otra vez cuando responde Todoist
-    const run = p => { draw(); p.then(draw); };
+    const run = p => { draw(); renderBoard(); p.then(() => { draw(); renderBoard(); }); };
 
     // Atajos en los cuadros de texto: Ctrl/Cmd+Intro guarda, Escape cancela sin cerrar el panel
     const keys = (area, onSave, onCancel) => area.addEventListener('keydown', e => {
@@ -699,13 +702,14 @@
       };
       keys(area, add, null);
 
-      box.replaceChildren(
+      box.replaceChildren(...[
         h('span', { class: 'field-label' }, 'Comentarios'),
         notes.length ? list : null,
         area,
         h('div', { class: 'note-actions' },
           h('span', { class: 'hint' }, 'Se guardan en Todoist al momento.'),
-          h('button', { type: 'button', class: 'btn ghost small', onclick: add }, 'Comentar')));
+          h('button', { type: 'button', class: 'btn ghost small', onclick: add }, 'Comentar'))
+      ].filter(Boolean));
       if (focusArea) {
         focusArea.focus();
         focusArea.setSelectionRange(focusArea.value.length, focusArea.value.length);

@@ -203,7 +203,10 @@ body.tag-dragging, body.tag-dragging * { cursor: grabbing !important; }
   font-size: 14px; font-weight: 600; color: var(--text);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer;
 }
-.card-tags { grid-column: 2; display: flex; flex-wrap: wrap; gap: 4px; }
+.card.has-notes { grid-template-columns: 16px minmax(0, 1fr) auto; }
+.card-notes { display: inline-grid; place-items: center; color: var(--faint); }
+.card-notes svg { width: 14px; height: 14px; stroke-width: 2; }
+.card-tags { grid-column: 2 / -1; display: flex; flex-wrap: wrap; gap: 4px; }
 .mini-tag {
   --c: #9AA4B5;
   flex: 0 0 auto; display: inline-flex; align-items: center; height: 18px; padding: 0 7px; border-radius: 999px;
