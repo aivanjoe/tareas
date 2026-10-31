@@ -1063,12 +1063,6 @@
       else if (groups[rn]) { labels.push(groups[rn]); grupos.push(rn); }
     }
     const items = arr => (arr || []).map(x => ({ valor: x.value, tipo: x.type || '', etiqueta: x.formattedType || '' })).filter(x => x.valor);
-    // Fechas del contacto (Eventos de Google): el santo es la de tipo "Santo"; las demás se guardan tal
-    // cual para no perderlas al escribir (al actualizar, Google sustituye la lista entera)
-    const fechas = (p.events || []).filter(e => e.date && e.date.month && e.date.day);
-    const esSanto = e => /^(santo|onomastica)$/.test(normName(e.type || e.formattedType));
-    const st = fechas.find(esSanto);
-    const otrasFechas = fechas.filter(e => e !== st).map(e => Object.assign({ date: Object.assign({}, e.date) }, e.type ? { type: e.type } : {}));
     return {
       id, resourceName: p.resourceName, etag: p.etag || null,
       nombre: (nm && nm.displayName) || [nm && nm.givenName, nm && nm.familyName].filter(Boolean).join(' ') || (prim(p.emailAddresses) || {}).value || 'Sin nombre',
@@ -1076,8 +1070,6 @@
       telefonos: items(p.phoneNumbers),
       emails: items(p.emailAddresses),
       cumple: bd ? (bd.date.year ? bd.date.year + '-' : '--') + two(bd.date.month) + '-' + two(bd.date.day) : null,
-      santo: st ? '--' + two(st.date.month) + '-' + two(st.date.day) : null,
-      otrasFechas,
       notas: ((p.biographies || [])[0] || {}).value || '',
       etiquetas: labels.sort((a, b) => a.localeCompare(b, 'es')),
       grupos: grupos.sort(),
@@ -1087,6 +1079,9 @@
       empresa: org ? [org.name, org.title].filter(Boolean).join(' · ') : ''
     };
   }
+
+  // Fecha «Santo» de un contacto en Google (guardada por una versión anterior de la app)
+  const esFechaSanto = e => /^(santo|onomastica)$/.test(normName(e.type || e.formattedType));
 
   // Categorías del usuario: colección "gruposContactos" ({id: resourceName, nombre})
   const grupoMap = () => Object.fromEntries(Object.values(S.datos.colecciones.gruposContactos || {}).map(g => [g.id, g.nombre]));
@@ -1107,12 +1102,29 @@
         }
         page = r.nextPageToken || '';
       } while (page);
-      const recs = {};
+      const recs = {}, conSanto = [];
       do {
         const r = await ggGet(PEOPLE + 'people/me/connections?personFields=' + PERSON_FIELDS + '&pageSize=1000' + (page ? '&pageToken=' + encodeURIComponent(page) : ''));
-        for (const p of r.connections || []) { const c = contactFrom(p, groups); recs[c.id] = c; }
+        for (const p of r.connections || []) {
+          const c = contactFrom(p, groups); recs[c.id] = c;
+          if ((p.events || []).some(esFechaSanto)) conSanto.push(p);
+        }
         page = r.nextPageToken || '';
       } while (page);
+      // Una vez por dispositivo: quita de Google las fechas «Santo» que guardó una versión anterior
+      // de la app (el santo ya no va en el contacto, sino en el santoral de Cumples)
+      if (!S.gg.santosLimpios && S.gg.write) {
+        let fallos = 0;
+        for (const p of conSanto) {
+          try {
+            const np = await ggCall('PATCH', PEOPLE + p.resourceName + ':updateContact?updatePersonFields=events&personFields=' + PERSON_FIELDS,
+              { etag: p.etag, events: p.events.filter(e => !esFechaSanto(e)).map(e => Object.assign({ date: e.date }, e.type ? { type: e.type } : {})) });
+            const c = contactFrom(np, groups); recs[c.id] = c;
+          } catch (e) { fallos++; }
+        }
+        if (!fallos) { S.gg.santosLimpios = true; saveGg(); }
+        if (conSanto.length - fallos > 0) toast('Quitado el santo de ' + (conSanto.length - fallos) + (conSanto.length - fallos === 1 ? ' contacto' : ' contactos') + ' en Google');
+      }
       if (stable(recs) !== stable(S.datos.colecciones.contactos || {}) || stable(grecs) !== stable(S.datos.colecciones.gruposContactos || {})) {
         S.datos.colecciones.contactos = recs;
         S.datos.colecciones.gruposContactos = grecs;
@@ -1133,16 +1145,14 @@
   }
 
   // ---- escritura en Google ----
-  // f: { nombrePila, apellidos, telefonos, emails, cumple: {dia, mes, anio}|null, santo: {dia, mes}|null, notas, org, direcciones, categorias: [nombres], favorito }
-  // cur: contacto que se edita (sus otras fechas se conservan)
-  function personBody(f, cur) {
+  // f: { nombrePila, apellidos, telefonos, emails, cumple: {dia, mes, anio}|null, notas, org, direcciones, categorias: [nombres], favorito }
+  function personBody(f) {
     const list = (arr, key) => arr.filter(x => x.valor.trim()).map(x => ({ [key]: x.valor.trim(), type: x.tipo || 'other' }));
     const body = {
       names: [{ givenName: f.nombrePila.trim(), familyName: f.apellidos.trim() }],
       phoneNumbers: list(f.telefonos, 'value'),
       emailAddresses: list(f.emails, 'value'),
       birthdays: f.cumple ? [{ date: Object.assign({ month: f.cumple.mes, day: f.cumple.dia }, f.cumple.anio ? { year: f.cumple.anio } : {}) }] : [],
-      events: ((cur && cur.otrasFechas) || []).concat(f.santo ? [{ date: { month: f.santo.mes, day: f.santo.dia }, type: 'Santo' }] : []),
       biographies: f.notas.trim() ? [{ value: f.notas.trim(), contentType: 'TEXT_PLAIN' }] : [],
       organizations: f.org.nombre.trim() || f.org.cargo.trim() ? [{ name: f.org.nombre.trim(), title: f.org.cargo.trim() }] : [],
       addresses: list(f.direcciones, 'formattedValue')
@@ -1153,13 +1163,11 @@
   async function saveContacto(cur, f) {
     const groups = grupoMap();
     let person;
-    // Sin las otras fechas del contacto (guardado por una versión anterior) no se escribe: se perderían
-    if (cur && !Array.isArray(cur.otrasFechas)) throw new GgError('conflict', 'Hay que releer este contacto antes de editarlo.');
     if (cur) {
-      person = await ggCall('PATCH', PEOPLE + cur.resourceName + ':updateContact?updatePersonFields=names,phoneNumbers,emailAddresses,birthdays,events,biographies,organizations,addresses&personFields=' + PERSON_FIELDS,
-        Object.assign({ etag: cur.etag }, personBody(f, cur)));
+      person = await ggCall('PATCH', PEOPLE + cur.resourceName + ':updateContact?updatePersonFields=names,phoneNumbers,emailAddresses,birthdays,biographies,organizations,addresses&personFields=' + PERSON_FIELDS,
+        Object.assign({ etag: cur.etag }, personBody(f)));
     } else {
-      person = await ggCall('POST', PEOPLE + 'people:createContact?personFields=' + PERSON_FIELDS, personBody(f, null));
+      person = await ggCall('POST', PEOPLE + 'people:createContact?personFields=' + PERSON_FIELDS, personBody(f));
     }
     const rn = person.resourceName;
     // Categorías: las nuevas se crean en Google; después se añade o quita el contacto de cada una
@@ -1184,17 +1192,6 @@
     for (const [g, body] of changes) await ggCall('POST', PEOPLE + g + '/members:modify', body);
     if (changes.length) person = await ggGet(PEOPLE + rn + '?personFields=' + PERSON_FIELDS); // etag y grupos al día
     const rec = contactFrom(person, groups);
-    S.datos.colecciones.contactos = Object.assign({}, S.datos.colecciones.contactos, { [rec.id]: rec });
-    saveDatos();
-    return rec;
-  }
-
-  // Pone el santo de un contacto en Google tocando solo sus fechas (Eventos)
-  async function saveSanto(cur, santo) {
-    if (!Array.isArray(cur.otrasFechas)) throw new GgError('conflict', 'Hay que releer este contacto antes de editarlo.');
-    const person = await ggCall('PATCH', PEOPLE + cur.resourceName + ':updateContact?updatePersonFields=events&personFields=' + PERSON_FIELDS,
-      { etag: cur.etag, events: personBody(Object.assign(formDeContacto(cur), { santo }), cur).events });
-    const rec = contactFrom(person, grupoMap());
     S.datos.colecciones.contactos = Object.assign({}, S.datos.colecciones.contactos, { [rec.id]: rec });
     saveDatos();
     return rec;
@@ -1286,12 +1283,12 @@
       let k = Math.max(5000, Math.ceil(lived / 5000) * 5000);
       for (let i = 0; i < 2; i++, k += 5000) ev('dias:' + c.id + ':' + k, shortName(c) + ' · ' + fmtNum(k) + ' días', ymdOf(birth + k * DAY), { colorId: '6' });
     }
-    // Santos de los contactos seguidos
-    for (const c of contactos()) {
-      if (!cdMarked(c.id) || !c.santo) continue;
-      const mmdd = c.santo.slice(-5);
-      ev('santo:' + c.id, shortName(c) + ' · santo', year + '-' + (mmdd === '02-29' && !isLeap(year) ? '02-28' : mmdd), {
-        recurrence: [mmdd === '02-29' ? 'RRULE:FREQ=YEARLY;BYMONTH=2;BYMONTHDAY=-1' : 'RRULE:FREQ=YEARLY'], colorId: '3'
+    // Santos elegidos del santoral de Cumples (uno por nombre, aunque lo lleven varias personas)
+    for (const st of santosDeCumples().lista) {
+      if (!st.calendario) continue;
+      ev('santo:' + st.clave, santoTitulo(st), year + '-' + (st.fecha === '02-29' && !isLeap(year) ? '02-28' : st.fecha), {
+        recurrence: [st.fecha === '02-29' ? 'RRULE:FREQ=YEARLY;BYMONTH=2;BYMONTHDAY=-1' : 'RRULE:FREQ=YEARLY'], colorId: '3',
+        description: 'Lo celebran: ' + st.personas.map(shortName).join(', ') + '.\nCreado por Mi panel.'
       });
     }
     // Gastos marcados para el calendario (activos)
@@ -1310,7 +1307,7 @@
   }
 
   const calSame = (e, d) => e.summary === d.summary && (e.start || {}).date === d.start.date && (e.end || {}).date === d.end.date &&
-    (e.recurrence || []).join() === (d.recurrence || []).join() && (e.colorId || '') === (d.colorId || '');
+    (e.recurrence || []).join() === (d.recurrence || []).join() && (e.colorId || '') === (d.colorId || '') && (e.description || '') === (d.description || '');
 
   // Deja los eventos de la app como mandan los datos: crea, cambia o borra solo los suyos
   async function calReconcile() {
@@ -2776,47 +2773,6 @@
     setTimeout(() => search.focus(), 50);
   }
 
-  // Santos de los contactos seguidos: el que tiene cada uno o la sugerencia por el nombre, que se
-  // guarda en Google con «Usar» (sin tocar nada más del contacto). «Editar» abre el formulario.
-  function openSantos() {
-    const lista = () => contactos().filter(c => cdMarked(c.id)).sort((a, b) => (!!a.santo - !!b.santo) || a.nombre.localeCompare(b.nombre, 'es'));
-    const list = h('div', { class: 'pick-list' });
-    let close = null, busy = false;
-    const usar = async (c, sg, btn) => {
-      if (busy) return;
-      if (!ggEnsureWrite({ edit: null })) return;
-      busy = true;
-      btn.disabled = true;
-      btn.textContent = 'Guardando…';
-      try {
-        let cur = c;
-        if (!cur.etag || !Array.isArray(cur.otrasFechas)) cur = await reloadContacto(cur);
-        if (!cur) throw new Error('No se pudo leer el contacto de Google.');
-        await saveSanto(cur, sg);
-        toast('Santo de ' + cur.nombre + ' guardado en Google');
-      } catch (e) {
-        if (e.kind === 'login' || e.kind === 'scope') { close(); ggLogin(e.kind === 'scope'); return; }
-        if (e.kind === 'conflict') { await reloadContacto(c); toast('Este contacto cambió en Google: se ha recargado. Vuelve a probar.', 'error', null, 8000); }
-        else toast(e.message || 'No se pudo guardar en Google.', 'error', null, 8000);
-      } finally { busy = false; draw(); }
-    };
-    const draw = () => list.replaceChildren(...lista().map(c => {
-      const sg = c.santo ? null : santoSugerido(pilaDe(c));
-      const btnUsar = sg ? h('button', { type: 'button', class: 'btn primary small' }, 'Usar') : null;
-      if (btnUsar) btnUsar.addEventListener('click', () => usar(c, sg, btnUsar));
-      return h('div', { class: 'pick static santo-row' + (c.santo ? ' on' : '') },
-        h('span', { class: 'ev-badge santo' + (c.santo ? '' : ' off') }, ICON.halo()),
-        h('span', { class: 'ev-main' }, h('span', { class: 'ev-name' }, c.nombre),
-          h('span', { class: 'ev-what' }, c.santo ? santoText(c.santo) : sg ? 'Sugerido: ' + sg.dia + ' de ' + MESES_LARGOS_CT[sg.mes - 1] : 'Sin sugerencia: ponlo con Editar')),
-        btnUsar,
-        h('button', { type: 'button', class: 'btn subtle small', onclick: () => { close(); openEditContacto(c.id); } }, 'Editar'));
-    }));
-    draw();
-    close = openModal('Santos', h('div', { class: 'form' },
-      h('p', { class: 'hint' }, 'Santos de los contactos que sigues en Cumples. La sugerencia sale del nombre y se guarda en Google como fecha «Santo» con «Usar»; para otra fecha, «Editar».'),
-      list), { onClose: () => { if (S.ui.view === 'contactos') renderCumpledias(); } });
-  }
-
   function cumpleText(cumple) {
     if (!cumple) return 'Sin cumpleaños';
     if (/^\d{4}/.test(cumple)) return fmtDay(utcDay(cumple));
@@ -2927,7 +2883,6 @@
       const txt = full ? fmtDay(utcDay(c.cumple)) : (+dd) + ' de ' + MESES_LARGOS_CT[+mm - 1];
       sect('Cumpleaños', [line(txt, full ? Math.floor((todayUtc() - utcDay(c.cumple)) / DAY / 365.2425) + ' años' : '', null)]);
     }
-    if (c.santo) sect('Santo', [line(santoText(c.santo), '', null)]);
     if ((c.etiquetas || []).length) sect('Categorías', [h('div', { class: 'chips' }, c.etiquetas.map(e => h('span', { class: 'chip on static', style: '--c:' + catColorC(e) }, h('span', { class: 'dot' }), e)))]);
     if (c.empresa) sect('Empresa', [line(c.empresa, '', null)]);
     sect('Direcciones', (c.direcciones || []).map(d => line(d.valor, d.tipo, null)));
@@ -2950,33 +2905,28 @@
   const TIPOS_MAIL = [['home', 'Personal'], ['work', 'Trabajo'], ['other', 'Otro']];
   const TIPOS_DIR = [['home', 'Casa'], ['work', 'Trabajo'], ['other', 'Otro']];
 
-  // Datos de un contacto en el formato del formulario (f de personBody)
-  function formDeContacto(cur) {
+  async function openEditContacto(id, draft) {
+    let cur = id ? (S.datos.colecciones.contactos || {})[id] : null;
+    if (id && !cur) { toast('Ese contacto ya no está.', 'error'); return; }
+    if (!ggEnsureWrite({ edit: id || null, draft: draft || null })) return;
+    if (cur && !cur.etag) {
+      // Datos guardados por una versión anterior de la app: se releen antes de editar
+      await syncContactos();
+      cur = (S.datos.colecciones.contactos || {})[id];
+      if (!cur || !cur.etag) { toast('No se pudo preparar el contacto para editarlo. Pulsa «Actualizar desde Google».', 'error'); return; }
+    }
     const parts = cur && cur.cumple ? cur.cumple.replace(/^--/, '0-').split('-').map(Number) : null;
-    return {
+    const f = draft || {
       nombrePila: cur ? cur.nombrePila || (cur.apellidos ? '' : cur.nombre) : '', apellidos: cur ? cur.apellidos || '' : '',
       telefonos: cur ? cur.telefonos.map(x => ({ valor: x.valor, tipo: x.tipo, etiqueta: x.etiqueta })) : [{ valor: '', tipo: 'mobile' }],
       emails: cur ? cur.emails.map(x => ({ valor: x.valor, tipo: x.tipo, etiqueta: x.etiqueta })) : [{ valor: '', tipo: 'home' }],
       cumple: parts ? { anio: parts[0] || null, mes: parts[1], dia: parts[2] } : null,
-      santo: cur && cur.santo ? { mes: +cur.santo.slice(2, 4), dia: +cur.santo.slice(5, 7) } : null,
       notas: cur ? cur.notas || '' : '',
       org: cur ? Object.assign({ nombre: '', cargo: '' }, cur.org) : { nombre: '', cargo: '' },
       direcciones: cur ? (cur.direcciones || []).map(x => ({ valor: x.valor, tipo: x.tipo, etiqueta: x.etiqueta })) : [],
       categorias: cur ? (cur.etiquetas || []).slice() : [],
       favorito: cur ? !!cur.favorito : false
     };
-  }
-
-  async function openEditContacto(id, draft) {
-    let cur = id ? (S.datos.colecciones.contactos || {})[id] : null;
-    if (id && !cur) { toast('Ese contacto ya no está.', 'error'); return; }
-    if (!ggEnsureWrite({ edit: id || null, draft: draft || null })) return;
-    if (cur && (!cur.etag || !Array.isArray(cur.otrasFechas))) {
-      // Datos guardados por una versión anterior de la app: se releen antes de editar
-      cur = await reloadContacto(cur);
-      if (!cur || !cur.etag || !Array.isArray(cur.otrasFechas)) { toast('No se pudo preparar el contacto para editarlo. Pulsa «Actualizar desde Google».', 'error'); return; }
-    }
-    const f = draft || formDeContacto(cur);
 
     const inp = (attrs, val, onInput) => {
       const el = h('input', Object.assign({ class: 'input', autocomplete: 'off' }, attrs));
@@ -3005,19 +2955,6 @@
     const dia = inp({ type: 'text', inputmode: 'numeric', placeholder: 'Día', 'aria-label': 'Día', maxlength: '2' }, f.cumple ? String(f.cumple.dia) : '', () => {});
     const mes = h('select', { class: 'select', 'aria-label': 'Mes' }, h('option', { value: '' }, 'Mes'), MESES_LARGOS_CT.map((m, i) => h('option', { value: String(i + 1), selected: f.cumple && f.cumple.mes === i + 1 }, m)));
     const anio = inp({ type: 'text', inputmode: 'numeric', placeholder: 'Año', 'aria-label': 'Año', maxlength: '4' }, f.cumple && f.cumple.anio ? String(f.cumple.anio) : '', () => {});
-    // Santo: día y mes, con sugerencia según el nombre mientras esté vacío
-    const sDia = inp({ type: 'text', inputmode: 'numeric', placeholder: 'Día', 'aria-label': 'Día del santo', maxlength: '2' }, f.santo ? String(f.santo.dia) : '', () => drawSug());
-    const sMes = h('select', { class: 'select', 'aria-label': 'Mes del santo' }, h('option', { value: '' }, 'Mes'), MESES_LARGOS_CT.map((m, i) => h('option', { value: String(i + 1), selected: f.santo && f.santo.mes === i + 1 }, m)));
-    sMes.addEventListener('change', () => drawSug());
-    const sugBox = h('p', { class: 'hint santo-sug' });
-    const drawSug = () => {
-      const sg = !sDia.value.trim() && !sMes.value ? santoSugerido(f.nombrePila || (cur ? pilaDe(cur) : '')) : null;
-      sugBox.replaceChildren(...(sg ? [
-        'Sugerencia por el nombre: ' + sg.dia + ' de ' + MESES_LARGOS_CT[sg.mes - 1] + ' ',
-        h('button', { type: 'button', class: 'btn subtle small', onclick: () => { sDia.value = String(sg.dia); sMes.value = String(sg.mes); drawSug(); } }, 'Usar')
-      ] : ['Día y mes. Sale en Cumples y en el calendario si sigues al contacto.']));
-    };
-    drawSug();
 
     const cats = [...new Set(Object.values(grupoMap()).concat(f.categorias))].sort((a, b) => a.localeCompare(b, 'es'));
     const catBox = h('div', { class: 'chips' });
@@ -3053,20 +2990,10 @@
       if (!(mn >= 1 && mn <= 12) || !(dn >= 1 && dn <= max) || (yn !== null && !(yn >= 1900 && yn <= new Date().getFullYear()))) return { ok: false };
       return { ok: true, val: { dia: dn, mes: mn, anio: yn } };
     };
-    const readSanto = () => {
-      const d = sDia.value.trim(), m = sMes.value;
-      if (!d && !m) return { ok: true, val: null };
-      const dn = +d, mn = +m;
-      if (!(mn >= 1 && mn <= 12) || !(dn >= 1 && dn <= new Date(Date.UTC(2000, mn, 0)).getUTCDate())) return { ok: false };
-      return { ok: true, val: { dia: dn, mes: mn } };
-    };
     const save = async () => {
       const bd = readCumple();
       if (!bd.ok) { toast('Revisa la fecha de cumpleaños (día y mes; el año es opcional).', 'error'); return; }
       f.cumple = bd.val;
-      const sv = readSanto();
-      if (!sv.ok) { toast('Revisa la fecha del santo (día y mes).', 'error'); return; }
-      f.santo = sv.val;
       if (!f.nombrePila.trim() && !f.apellidos.trim()) { toast('Escribe al menos el nombre.', 'error'); return; }
       saveBtn.disabled = true;
       saveBtn.textContent = 'Guardando…';
@@ -3099,12 +3026,11 @@
     const fld = (label, ...els) => h('div', { class: 'field' }, h('span', { class: 'field-label' }, label), ...els);
     const body = h('div', { class: 'form' },
       h('div', { class: 'form-row' },
-        fld('Nombre', inp({ type: 'text', maxlength: '80', 'aria-label': 'Nombre' }, f.nombrePila, v => { f.nombrePila = v; drawSug(); })),
+        fld('Nombre', inp({ type: 'text', maxlength: '80', 'aria-label': 'Nombre' }, f.nombrePila, v => { f.nombrePila = v; })),
         fld('Apellidos', inp({ type: 'text', maxlength: '80', 'aria-label': 'Apellidos' }, f.apellidos, v => { f.apellidos = v; }))),
       fld('Teléfonos', rowsEditor(f.telefonos, TIPOS_TEL, { type: 'tel', inputmode: 'tel', placeholder: 'Teléfono', 'aria-label': 'Teléfono' }, 'Añadir teléfono', 'mobile')),
       fld('Correos', rowsEditor(f.emails, TIPOS_MAIL, { type: 'email', inputmode: 'email', placeholder: 'Correo', 'aria-label': 'Correo' }, 'Añadir correo', 'home')),
       fld('Cumpleaños', h('div', { class: 'date-parts' }, dia, mes, anio), h('p', { class: 'hint' }, 'Día y mes; el año es opcional.')),
-      fld('Santo', h('div', { class: 'date-parts two' }, sDia, sMes), sugBox),
       fld('Categorías', catBox, h('div', { class: 'row-edit two' }, nuevaCat, h('button', { type: 'button', class: 'btn ghost small', onclick: addCat }, 'Añadir'))),
       h('label', { class: 'check-line', for: 'ceFav' }, fav, 'Favorito (destacado en Google)'),
       h('div', { class: 'form-row' },
@@ -3130,82 +3056,184 @@
     close = openModal(cur ? 'Editar contacto' : 'Nuevo contacto', body);
   }
 
-  // ---- santos ----
+  // ---------- santoral ----------
+  // Los santos no van en los contactos: la app tiene su santoral y, con los nombres de los
+  // contactos seguidos en Cumples, el usuario elige qué santos van al calendario (uno por nombre).
+  // Colección "santos": { id: clave (nombre normalizado), nombre, fecha: 'MM-DD', genero: 'm'|'f',
+  // calendario: bool, manual: bool }. Solo se guarda lo que el usuario toca; el resto sale del santoral.
   const SANTO_COLOR = '#B79CF0';
-  // Santoral básico para sugerir el santo a partir del nombre (fecha más habitual en España).
-  // Solo es una sugerencia: el usuario la confirma o la cambia antes de guardarla.
+  // Fecha más habitual en España
   const SANTORAL = {
-    '01-01': 'manuel manuela', '01-06': 'reyes', '01-10': 'gonzalo', '01-17': 'anton', '01-19': 'mario',
-    '01-20': 'sebastian fabian', '01-21': 'ines', '01-22': 'vicente vicenta',
-    '01-26': 'paula', '02-03': 'blas oscar', '02-05': 'agueda', '02-11': 'lourdes',
-    '02-14': 'valentin cirilo metodio', '02-19': 'alvaro', '02-26': 'alejandro alejandra', '03-09': 'francisca',
-    '03-13': 'rodrigo', '03-17': 'patricio', '03-19': 'jose josefa josefina pepe pepa', '03-25': 'encarnacion anunciacion',
-    '04-01': 'hugo', '04-03': 'ricardo', '04-04': 'isidoro', '04-23': 'jorge', '04-25': 'marcos', '04-27': 'montserrat',
-    '04-29': 'catalina', '05-03': 'felipe', '05-13': 'fatima', '05-15': 'isidro', '05-17': 'pascual',
-    '05-30': 'fernando', '06-13': 'antonio antonia', '06-24': 'juan', '06-29': 'pedro pablo',
-    '07-03': 'tomas', '07-07': 'fermin', '07-10': 'cristobal', '07-11': 'benito', '07-13': 'enrique',
-    '07-16': 'carmen', '07-21': 'daniel', '07-22': 'magdalena', '07-24': 'cristina', '07-25': 'santiago jaime jacobo',
-    '07-26': 'ana joaquin', '07-29': 'marta beatriz', '07-31': 'ignacio', '08-01': 'alfonso', '08-03': 'lidia',
-    '08-05': 'nieves', '08-07': 'cayetano', '08-08': 'domingo', '08-10': 'lorenzo', '08-11': 'clara susana',
-    '08-15': 'asuncion paloma', '08-18': 'elena helena', '08-20': 'bernardo', '08-23': 'rosa', '08-24': 'bartolome',
-    '08-25': 'luis', '08-27': 'monica', '08-28': 'agustin', '08-31': 'ramon', '09-08': 'natividad nuria covadonga',
-    '09-12': 'maria', '09-15': 'dolores', '09-17': 'roberto', '09-21': 'mateo', '09-24': 'mercedes',
-    '09-29': 'miguel gabriel rafael', '09-30': 'jeronimo', '10-02': 'angel', '10-04': 'francisco',
-    '10-07': 'rosario', '10-11': 'begona', '10-12': 'pilar', '10-13': 'eduardo', '10-15': 'teresa',
-    '10-18': 'lucas', '10-19': 'laura', '10-20': 'irene', '10-28': 'simon judas', '11-03': 'silvia',
-    '11-04': 'carlos', '11-09': 'almudena', '11-11': 'martin', '11-13': 'diego', '11-15': 'alberto',
-    '11-22': 'cecilia', '11-30': 'andres', '12-03': 'javier', '12-04': 'barbara', '12-06': 'nicolas',
-    '12-08': 'concepcion inmaculada inma concha', '12-12': 'guadalupe', '12-13': 'lucia', '12-18': 'esperanza',
-    '12-25': 'noelia belen', '12-26': 'esteban', '12-29': 'david'
+    '01-01': 'Manuel Manuela', '01-06': 'Reyes', '01-10': 'Gonzalo', '01-17': 'Antón', '01-19': 'Mario',
+    '01-20': 'Sebastián Fabián', '01-21': 'Inés', '01-22': 'Vicente Vicenta', '01-26': 'Paula', '02-03': 'Blas Óscar',
+    '02-05': 'Águeda', '02-11': 'Lourdes', '02-14': 'Valentín', '02-19': 'Álvaro', '02-26': 'Alejandro Alejandra',
+    '03-09': 'Francisca', '03-13': 'Rodrigo', '03-17': 'Patricio', '03-19': 'José Josefa Josefina', '03-25': 'Encarnación Anunciación',
+    '04-01': 'Hugo', '04-03': 'Ricardo', '04-04': 'Isidoro', '04-23': 'Jorge', '04-25': 'Marcos', '04-27': 'Montserrat',
+    '04-29': 'Catalina', '05-03': 'Felipe', '05-13': 'Fátima', '05-15': 'Isidro', '05-17': 'Pascual', '05-30': 'Fernando',
+    '06-13': 'Antonio Antonia', '06-24': 'Juan', '06-29': 'Pedro Pablo', '07-03': 'Tomás', '07-07': 'Fermín',
+    '07-10': 'Cristóbal', '07-11': 'Benito', '07-13': 'Enrique', '07-16': 'Carmen', '07-21': 'Daniel', '07-22': 'Magdalena',
+    '07-24': 'Cristina', '07-25': 'Santiago Jaime Jacobo', '07-26': 'Ana Joaquín', '07-29': 'Marta Beatriz', '07-31': 'Ignacio',
+    '08-01': 'Alfonso', '08-03': 'Lidia', '08-05': 'Nieves', '08-07': 'Cayetano', '08-08': 'Domingo', '08-10': 'Lorenzo',
+    '08-11': 'Clara Susana', '08-15': 'Asunción Paloma', '08-18': 'Elena Helena', '08-20': 'Bernardo', '08-23': 'Rosa',
+    '08-24': 'Bartolomé', '08-25': 'Luis', '08-27': 'Mónica', '08-28': 'Agustín', '08-31': 'Ramón',
+    '09-08': 'Natividad Nuria Covadonga', '09-12': 'María', '09-15': 'Dolores', '09-17': 'Roberto', '09-21': 'Mateo',
+    '09-24': 'Mercedes', '09-29': 'Miguel Gabriel Rafael', '09-30': 'Jerónimo', '10-02': 'Ángel', '10-04': 'Francisco',
+    '10-07': 'Rosario', '10-11': 'Begoña', '10-12': 'Pilar', '10-13': 'Eduardo', '10-15': 'Teresa', '10-18': 'Lucas',
+    '10-19': 'Laura', '10-20': 'Irene', '10-28': 'Simón Judas', '11-03': 'Silvia', '11-04': 'Carlos', '11-09': 'Almudena',
+    '11-11': 'Martín', '11-13': 'Diego', '11-15': 'Alberto', '11-22': 'Cecilia', '11-30': 'Andrés', '12-03': 'Javier',
+    '12-04': 'Bárbara', '12-06': 'Nicolás', '12-08': 'Concepción Inmaculada', '12-12': 'Guadalupe', '12-13': 'Lucía',
+    '12-18': 'Esperanza', '12-25': 'Noelia Belén', '12-26': 'Esteban', '12-29': 'David'
   };
-  // Hipocorísticos y variantes que no están tal cual en el santoral
-  const SANTO_ALIAS = { paco: 'francisco', pancho: 'francisco', manolo: 'manuel', nacho: 'ignacio', quique: 'enrique',
-    rafa: 'rafael', alex: 'alejandro', lola: 'dolores', loli: 'dolores', maite: 'teresa', tere: 'teresa', chema: 'jose',
-    pili: 'pilar', merche: 'mercedes', charo: 'rosario', toni: 'antonio', tono: 'antonio', santi: 'santiago',
-    xavier: 'javier', jordi: 'jorge', pau: 'pablo', joan: 'juan', josep: 'jose', marc: 'marcos', pere: 'pedro', nico: 'nicolas',
-    jaume: 'jaime', fran: 'francisco', cris: 'cristina' };
+  // Nombres de mujer que no acaban en "a" (los que acaban en "a" ya se tratan como de mujer)
+  const SANTO_FEM = ['reyes', 'ines', 'lourdes', 'encarnacion', 'anunciacion', 'montserrat', 'carmen', 'nieves', 'asuncion',
+    'natividad', 'dolores', 'mercedes', 'rosario', 'pilar', 'concepcion', 'belen', 'beatriz'];
+  const SANTO_MASC = ['santiago', 'luca', 'bautista', 'judas']; // de hombre aunque acaben en "a"
+  const SANTO_SANTO = ['tomas', 'domingo', 'toribio', 'tome']; // «Santo Tomás», no «San Tomás»
+  // Hipocorísticos y variantes
+  const SANTO_ALIAS = { paco: 'francisco', pancho: 'francisco', fran: 'francisco', manolo: 'manuel', nacho: 'ignacio', quique: 'enrique',
+    rafa: 'rafael', alex: 'alejandro', lola: 'dolores', loli: 'dolores', maite: 'teresa', tere: 'teresa', chema: 'jose', pepe: 'jose',
+    pepa: 'josefa', pepi: 'josefa', pili: 'pilar', merche: 'mercedes', charo: 'rosario', toni: 'antonio', tono: 'antonio',
+    santi: 'santiago', xavier: 'javier', jordi: 'jorge', pau: 'pablo', joan: 'juan', josep: 'jose', marc: 'marcos', pere: 'pedro',
+    nico: 'nicolas', jaume: 'jaime', cris: 'cristina', concha: 'concepcion', inma: 'inmaculada', mari: 'maria' };
+  const santoGenero = clave => SANTO_FEM.includes(clave) ? 'f' : SANTO_MASC.includes(clave) ? 'm' : /a$/.test(clave) ? 'f' : 'm';
   const SANTO_IDX = (() => {
     const m = {};
-    for (const [fecha, nombres] of Object.entries(SANTORAL)) {
-      for (const n of nombres.split(' ')) if (!m[n]) m[n] = fecha;
+    for (const [fecha, nombres] of Object.entries(SANTORAL)) for (const n of nombres.split(' ')) {
+      const k = normName(n);
+      if (!m[k]) m[k] = { clave: k, nombre: n, fecha, genero: santoGenero(k) };
     }
     return m;
   })();
-  // Sugerencia de santo para un nombre de pila: { mes, dia, por } o null.
-  // "María del Carmen" -> Carmen; "Juan Carlos" -> Juan; "Mari Carmen" -> Carmen.
-  function santoSugerido(nombrePila) {
-    const w = normName(nombrePila).replace(/[^a-z ]/g, ' ').split(' ').filter(x => x && !['de', 'del', 'la', 'las', 'los', 'y'].includes(x));
+  const santosGuardados = () => S.datos.colecciones.santos || {};
+  // Santo de un nombre de pila: primero los añadidos a mano, después el santoral.
+  // "María del Carmen" -> Carmen; "Juan Carlos" -> Juan; "Pepe" -> José.
+  function santoDe(pila) {
+    const w = normName(pila).replace(/[^a-z ]/g, ' ').split(' ').filter(x => x && !['de', 'del', 'la', 'las', 'los', 'y'].includes(x));
     if (!w.length) return null;
-    const look = x => {
-      const a = Object.prototype.hasOwnProperty.call(SANTO_ALIAS, x) ? SANTO_ALIAS[x] : x;
-      return a && SANTO_IDX[a] ? { fecha: SANTO_IDX[a], por: a } : null;
-    };
-    const esMaria = ['maria', 'mari', 'ma'].includes(w[0]);
-    const r = (esMaria && w.length > 1 && look(w[1])) || look(w[0]) || (esMaria ? look('maria') : null);
-    if (!r) return null;
-    const [mm, dd] = r.fecha.split('-').map(Number);
-    return { mes: mm, dia: dd, por: r.por };
+    const esMaria = ['maria', 'mari', 'ma', 'm'].includes(w[0]);
+    const cands = [w.join(' ')].concat(esMaria && w.length > 1 ? [w.slice(1).join(' '), w[1]] : [], [w[0]], esMaria ? ['maria'] : []);
+    const guard = santosGuardados();
+    for (const c of cands) {
+      if (guard[c] && guard[c].manual) return Object.assign({}, guard[c], { clave: c });
+      const a = Object.prototype.hasOwnProperty.call(SANTO_ALIAS, c) ? SANTO_ALIAS[c] : c;
+      if (SANTO_IDX[a]) return SANTO_IDX[a];
+    }
+    return null;
   }
-  const santoText = santo => { const [mm, dd] = santo.slice(2).split('-'); return (+dd) + ' de ' + MESES_LARGOS_CT[+mm - 1]; };
-  // Nombre de pila para el santo: el de Google o, si no lo hay, la primera palabra del nombre
+  // Nombre de pila: el de Google o, si no lo hay, la primera palabra del nombre
   const pilaDe = c => (c.nombrePila || '').trim() || c.nombre.trim().split(/\s+/)[0];
+  // Santos de los contactos seguidos en Cumples, uno por nombre, con lo guardado por el usuario encima
+  function santosDeCumples() {
+    const by = {}, sinSanto = [];
+    for (const c of contactos().filter(c => cdMarked(c.id)).sort((a, b) => a.nombre.localeCompare(b.nombre, 'es'))) {
+      const base = santoDe(pilaDe(c));
+      if (!base) { sinSanto.push(c); continue; }
+      if (!by[base.clave]) {
+        const g = santosGuardados()[base.clave] || {};
+        by[base.clave] = { clave: base.clave, nombre: g.nombre || base.nombre, fecha: /^\d{2}-\d{2}$/.test(g.fecha || '') ? g.fecha : base.fecha,
+          genero: g.genero || base.genero, calendario: !!g.calendario, manual: !!g.manual, cambiado: !!g.fecha && !g.manual && g.fecha !== base.fecha,
+          fechaSantoral: base.manual ? null : (SANTO_IDX[base.clave] || {}).fecha || null, personas: [] };
+      }
+      by[base.clave].personas.push(c);
+    }
+    const lista = Object.values(by).sort((a, b) => a.fecha.localeCompare(b.fecha) || a.nombre.localeCompare(b.nombre, 'es'));
+    return { lista, sinSanto };
+  }
+  const santoTitulo = st => (st.genero === 'f' ? 'Santa ' : SANTO_SANTO.includes(st.clave) ? 'Santo ' : 'San ') + st.nombre;
+  const santoFechaTxt = f => (+f.slice(3)) + ' de ' + MESES_LARGOS_CT[+f.slice(0, 2) - 1];
+  function guardarSanto(st, cambios) {
+    const rec = Object.assign({ id: st.clave, nombre: st.nombre, fecha: st.fecha, genero: st.genero, calendario: !!st.calendario, manual: !!st.manual }, cambios);
+    S.datos.colecciones.santos = Object.assign({}, S.datos.colecciones.santos, { [rec.id]: rec });
+    saveDatos();
+  }
+  // Próxima fecha (ms UTC, desde hoy incluido) de un 'MM-DD'
+  function proximaFecha(mmdd, today) {
+    const m = +mmdd.slice(0, 2) - 1, d = +mmdd.slice(3);
+    const on = y => Date.UTC(y, m, m === 1 && d === 29 && !isLeap(y) ? 28 : d);
+    const y = new Date(today).getUTCFullYear();
+    return on(y) < today ? on(y + 1) : on(y);
+  }
+
+  // Editar un santo (fecha y San/Santa) o añadir uno a mano para un nombre que no está en el santoral
+  function openSanto(st) {
+    const nuevo = !st;
+    const nombre = h('input', { class: 'input', type: 'text', maxlength: '40', 'aria-label': 'Nombre', placeholder: 'Nombre (p. ej. Zoe)', autocomplete: 'off' });
+    nombre.value = st ? st.nombre : '';
+    const gen = h('select', { class: 'select', 'aria-label': 'San o Santa' }, h('option', { value: 'm' }, 'San'), h('option', { value: 'f' }, 'Santa'));
+    gen.value = st ? st.genero : 'm';
+    nombre.addEventListener('input', () => { if (nuevo) gen.value = santoGenero(normName(nombre.value.trim())); });
+    const dia = h('input', { class: 'input', type: 'text', inputmode: 'numeric', maxlength: '2', placeholder: 'Día', 'aria-label': 'Día' });
+    const mes = h('select', { class: 'select', 'aria-label': 'Mes' }, h('option', { value: '' }, 'Mes'), MESES_LARGOS_CT.map((m, i) => h('option', { value: String(i + 1) }, m)));
+    if (st) { dia.value = String(+st.fecha.slice(3)); mes.value = String(+st.fecha.slice(0, 2)); }
+    let close = null;
+    const save = () => {
+      const n = nombre.value.trim(), dn = +dia.value.trim(), mn = +mes.value;
+      if (!n) { toast('Escribe el nombre.', 'error'); return; }
+      if (!(mn >= 1 && mn <= 12) || !(dn >= 1 && dn <= new Date(Date.UTC(2000, mn, 0)).getUTCDate())) { toast('Revisa el día y el mes.', 'error'); return; }
+      const fecha = String(mn).padStart(2, '0') + '-' + String(dn).padStart(2, '0');
+      if (nuevo) {
+        const clave = normName(n).replace(/[^a-z ]/g, ' ').replace(/\s+/g, ' ').trim();
+        if (!clave) { toast('Escribe el nombre.', 'error'); return; }
+        guardarSanto({ clave, nombre: n, fecha, genero: gen.value, calendario: false, manual: true }, {});
+      } else guardarSanto(st, { nombre: st.manual ? n : st.nombre, fecha, genero: gen.value });
+      close();
+      renderCumpledias();
+    };
+    const quitar = () => {
+      const rest = Object.assign({}, S.datos.colecciones.santos);
+      delete rest[st.clave];
+      S.datos.colecciones.santos = rest;
+      saveDatos();
+      close();
+      renderCumpledias();
+    };
+    const fld = (label, ...els) => h('div', { class: 'field' }, h('span', { class: 'field-label' }, label), ...els);
+    const body = h('div', { class: 'form' },
+      nuevo ? h('p', { class: 'hint' }, 'Para nombres de tus contactos que no están en el santoral. Se busca por el nombre de pila (sin tildes).') : null,
+      nuevo || st.manual ? fld('Nombre', nombre) : null,
+      fld('Título', h('div', { class: 'santo-gen' }, gen, h('span', { class: 'muted' }, nuevo ? 'y el nombre' : st.nombre))),
+      fld('Fecha', h('div', { class: 'date-parts two' }, dia, mes),
+        st && st.fechaSantoral ? h('p', { class: 'hint' }, 'En el santoral: ' + santoFechaTxt(st.fechaSantoral) + '.') : null),
+      h('div', { class: 'row-actions modal-foot' },
+        st && st.manual ? h('button', { type: 'button', class: 'btn danger small', onclick: quitar }, 'Borrar') : null,
+        st && st.cambiado ? h('button', { type: 'button', class: 'btn subtle small', onclick: () => { dia.value = String(+st.fechaSantoral.slice(3)); mes.value = String(+st.fechaSantoral.slice(0, 2)); } }, 'Fecha del santoral') : null,
+        h('span', { class: 'spacer' }),
+        h('button', { type: 'button', class: 'btn subtle small', onclick: () => close() }, 'Cancelar'),
+        h('button', { type: 'button', class: 'btn primary small', onclick: save }, 'Guardar')));
+    close = openModal(nuevo ? 'Añadir santo' : santoTitulo(st), body);
+  }
+
+  // Panel del santoral en Cumples
+  function santosPanel() {
+    const { lista, sinSanto } = santosDeCumples();
+    const rows = lista.map(st => {
+      const tog = h('button', { type: 'button', class: 'pick-box' + (st.calendario ? ' on' : ''), 'aria-pressed': st.calendario ? 'true' : 'false',
+        'aria-label': (st.calendario ? 'Quitar del calendario: ' : 'Poner en el calendario: ') + santoTitulo(st), title: st.calendario ? 'En el calendario' : 'Poner en el calendario',
+        onclick: () => { guardarSanto(st, { calendario: !st.calendario }); renderCumpledias(); } }, st.calendario ? ICON.check() : null);
+      return h('div', { class: 'santo-row' + (st.calendario ? ' on' : '') }, tog,
+        h('button', { type: 'button', class: 'ev-main as-btn', onclick: () => openSanto(st) },
+          h('span', { class: 'ev-name' }, santoTitulo(st)),
+          h('span', { class: 'ev-what' }, santoFechaTxt(st.fecha) + (st.cambiado ? ' (cambiada)' : '') + ' · ' + st.personas.map(c => c.nombre).join(', '))),
+        h('button', { type: 'button', class: 'icon-btn mini', 'aria-label': 'Editar ' + santoTitulo(st), onclick: () => openSanto(st) }, ICON.edit()));
+    });
+    return h('section', { class: 'panel santos-panel' },
+      h('div', { class: 'panel-head' }, h('h2', null, 'Santos'),
+        h('button', { type: 'button', class: 'btn subtle small', onclick: () => openSanto(null) }, ICON.plus(), 'Añadir santo')),
+      h('p', { class: 'hint' }, 'Los santos de los nombres de las personas que sigues, uno por nombre. Marca los que quieras en el calendario.'),
+      rows.length ? h('div', { class: 'santos-list' }, rows) : h('p', { class: 'muted empty-note' }, 'Ninguna de las personas que sigues tiene un nombre del santoral.'),
+      sinSanto.length ? h('p', { class: 'hint' }, 'Sin santo en el santoral: ' + sinSanto.map(c => c.nombre).join(', ') + '. Puedes añadirlo con «Añadir santo».') : null);
+  }
 
   const MESES_LARGOS_CT = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre'];
 
-  // Próximo santo de los contactos seguidos que lo tienen
-  function santoEvents(today) {
-    const y0 = new Date(today).getUTCFullYear();
-    return contactos().filter(c => cdMarked(c.id) && c.santo).map(c => {
-      const sm = +c.santo.slice(2, 4) - 1, sd = +c.santo.slice(5, 7);
-      const onYear = y => Date.UTC(y, sm, sm === 1 && sd === 29 && !isLeap(y) ? 28 : sd);
-      const date = onYear(y0) < today ? onYear(y0 + 1) : onYear(y0);
-      return { kind: 'santo', p: { id: c.id, name: c.nombre, src: 'google' }, value: null, date, until: Math.round((date - today) / DAY) };
-    });
-  }
-
   function cumpleNodes(today) {
     const people = cumplePeople();
-    const all = people.flatMap(p => personEvents(p, today)).concat(santoEvents(today)).sort((a, b) => a.date - b.date || a.p.name.localeCompare(b.p.name, 'es'));
+    // Santos elegidos para el calendario: uno por nombre
+    const santos = santosDeCumples().lista.filter(st => st.calendario).map(st => {
+      const date = proximaFecha(st.fecha, today);
+      return { kind: 'santo', st, p: { name: santoTitulo(st) }, value: null, date, until: Math.round((date - today) / DAY) };
+    });
+    const all = people.flatMap(p => personEvents(p, today)).concat(santos).sort((a, b) => a.date - b.date || a.p.name.localeCompare(b.p.name, 'es'));
     const events = all.filter(e => cdFilter === 'todo' || e.kind === cdFilter);
 
     const t = new Date(today), ty = t.getUTCFullYear(), tm = t.getUTCMonth();
@@ -3229,9 +3257,9 @@
     for (const e of events.slice(0, 20)) {
       const redondo = e.kind === 'dias' && e.value % 5000 === 0;
       const badge = e.kind === 'dias' ? fmtNum(e.value / 1000) + 'k' : e.value === null ? '' : String(e.value);
-      const what = e.kind === 'santo' ? 'Santo' : e.kind === 'dias' ? 'Cumple ' + fmtNum(e.value) + ' días de vida' : e.value === null ? 'Cumpleaños' : 'Cumple ' + e.value + (e.value === 1 ? ' año' : ' años');
+      const what = e.kind === 'santo' ? 'Santo de ' + e.st.personas.map(c => c.nombre).join(', ') : e.kind === 'dias' ? 'Cumple ' + fmtNum(e.value) + ' días de vida' : e.value === null ? 'Cumpleaños' : 'Cumple ' + e.value + (e.value === 1 ? ' año' : ' años');
       const kind = e.kind === 'santo' ? 'santo' : e.kind === 'cumple' ? 'cumple' : redondo ? 'redondo' : 'dias';
-      list.append(h('div', { class: 'ev cd-' + kind + (e.until === 0 ? ' today' : ''), onclick: e.kind === 'santo' ? () => openContacto(e.p.id) : null },
+      list.append(h('div', { class: 'ev cd-' + kind + (e.until === 0 ? ' today' : ''), onclick: e.kind === 'santo' ? () => openSanto(e.st) : null },
         h('span', { class: 'ev-badge ' + kind, title: kind === 'santo' ? 'Santo' : kind === 'cumple' ? 'Cumpleaños' : kind === 'redondo' ? 'Cumpledías redondo (múltiplo de 5.000)' : 'Cumpledías' }, kind === 'santo' ? ICON.halo() : badge || ICON.cake()),
         h('div', { class: 'ev-main' }, h('span', { class: 'ev-name' }, e.p.name), h('span', { class: 'ev-what' }, what)),
         h('div', { class: 'ev-when' },
@@ -3260,11 +3288,12 @@
             h('span', { class: 'lg', style: '--c:#F2B35B' }, 'Cada 5.000 días'),
             h('span', { class: 'lg', style: '--c:#7FA2E0' }, 'Cada 1.000 días')),
           list),
-        h('section', { class: 'panel' },
-          h('div', { class: 'panel-head' }, h('h2', null, 'Personas'),
-            contactos().some(c => cdMarked(c.id)) ? h('button', { type: 'button', class: 'btn subtle small', onclick: openSantos, title: 'Poner el santo de los contactos que sigues' }, ICON.halo(), 'Poner santos') : null,
-            h('button', { type: 'button', class: 'btn subtle small', onclick: openCdPicker }, ICON.plus(), 'Elegir')),
-          plist))];
+        h('div', { class: 'cd-side' },
+          h('section', { class: 'panel' },
+            h('div', { class: 'panel-head' }, h('h2', null, 'Personas'),
+              h('button', { type: 'button', class: 'btn subtle small', onclick: openCdPicker }, ICON.plus(), 'Elegir')),
+            plist),
+          santosPanel()))];
   }
 
   function openPerson(id) {

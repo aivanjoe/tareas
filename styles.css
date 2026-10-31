@@ -555,18 +555,17 @@ a.btn { text-decoration: none; }
 .panel > .seg { align-self: flex-start; }
 
 /* Santos (violeta) */
+.cd-side { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
 .ev.cd-santo { border-color: rgba(183, 156, 240, 0.35); cursor: pointer; }
 .ev-badge.santo { background: rgba(183, 156, 240, 0.16); color: #B79CF0; }
 .ev-badge.santo svg { stroke: #B79CF0; }
-.ev-badge.santo.off { background: transparent; box-shadow: inset 0 0 0 1px var(--line2); }
-.ev-badge.santo.off svg { stroke: var(--muted); }
 .ev.today.cd-santo { border-color: color-mix(in srgb, var(--accent) 60%, transparent); }
-.pick.santo-row { grid-template-columns: 36px minmax(0, 1fr) auto auto; cursor: default; }
-.pick.santo-row.on { border-color: rgba(183, 156, 240, 0.4); }
+.santos-panel .hint { margin: 0; }
+.santos-list { display: flex; flex-direction: column; gap: 6px; }
+.santo-row { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 8px 10px; border-radius: 10px; border: 1px solid var(--line); background: var(--card); }
+.santo-row.on { border-color: rgba(183, 156, 240, 0.45); }
+.santo-row .pick-box { cursor: pointer; background: transparent; padding: 0; }
+.santo-row .pick-box.on { background: #B79CF0; border-color: #B79CF0; }
+.santo-row .ev-what { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.santo-gen { display: grid; grid-template-columns: 110px minmax(0, 1fr); gap: 10px; align-items: center; }
 .date-parts.two { grid-template-columns: 70px minmax(0, 1fr); }
-.santo-sug { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
-@media (max-width: 560px) {
-  .pick.santo-row { grid-template-columns: 36px minmax(0, 1fr) auto; }
-  .pick.santo-row > .btn:last-child { grid-column: 2 / -1; justify-self: start; }
-  .date-parts.two { grid-template-columns: 58px minmax(0, 1fr); }
-}
