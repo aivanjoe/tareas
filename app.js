@@ -11,6 +11,15 @@
   if (/iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)) {
     const vp = document.querySelector('meta[name="viewport"]');
     if (vp && !/maximum-scale/.test(vp.content)) vp.content += ', maximum-scale=1';
+    // Safari recuerda el zoom de la pestaña al recargar; reaplicar la etiqueta lo devuelve a 1
+    const reset = () => {
+      if (!vp) return;
+      const base = vp.content.replace(/,\s*maximum-scale=1/, '');
+      vp.content = base;
+      requestAnimationFrame(() => { vp.content = base + ', maximum-scale=1'; });
+    };
+    window.addEventListener('pageshow', () => setTimeout(reset, 50));
+    setTimeout(reset, 300);
   }
 
   const API_URL = 'https://api.todoist.com/api/v1/sync';
@@ -707,7 +716,7 @@
           plList('/planner/plans/' + planId + '/tasks'),
           plCall('GET', '/planner/plans/' + planId + '/details')
         ]);
-        buckets = bk.map(b => ({ id: b.id, name: b.name, orderHint: b.orderHint || '' })).sort((a, b) => a.orderHint < b.orderHint ? -1 : a.orderHint > b.orderHint ? 1 : 0);
+        buckets = bk.map(b => ({ id: b.id, name: b.name, orderHint: b.orderHint || '' })).sort((a, b) => a.orderHint < b.orderHint ? 1 : a.orderHint > b.orderHint ? -1 : 0); // Planner los muestra de mayor a menor
         tasks = tk.filter(t => (t.percentComplete || 0) < 100).map(plTaskFrom);
         cats[planId] = { etag: plEtag(det), names: det.categoryDescriptions || {} };
       }
@@ -1253,40 +1262,21 @@
     }
   }
 
+  // Cabecera: cuándo se sincronizó la fuente de esta pantalla y, si alguna conexión necesita
+  // atención (reconectar o error), un aviso que se puede pulsar
   function renderSyncState() {
-    const when = S.data ? relTime(S.data.syncedAt) : 'nunca';
-    const busy = S.syncing || S.odState === 'syncing' || S.plState === 'syncing';
-    const whenTop = isWork() ? (S.pl.syncedAt ? relTime(S.pl.syncedAt) : 'nunca') : when;
-    document.getElementById('syncInfo').textContent = busy ? 'Sincronizando…' : 'Sincronizado ' + whenTop;
-    document.getElementById('syncSide').textContent = when;
-    const pl = document.getElementById('syncPl');
-    pl.hidden = !plConnected();
-    if (plConnected()) {
-      document.getElementById('syncPlState').textContent = S.plState === 'syncing' ? 'sincronizando…'
-        : S.plState === 'login' ? 'reconectar' : S.plState === 'error' ? 'con error'
-        : S.pl.syncedAt ? relTime(S.pl.syncedAt) : 'nunca';
-      pl.classList.toggle('warn', S.plState === 'login' || S.plState === 'error');
-    }
-    const od = document.getElementById('syncOd');
-    od.hidden = !odConnected();
-    if (odConnected()) {
-      const st = S.odState === 'syncing' ? 'sincronizando…'
-        : S.odState === 'login' ? 'reconectar'
-        : S.odState === 'error' ? 'con error'
-        : odPending() ? 'cambios sin subir'
-        : relTime(S.od.syncedAt);
-      document.getElementById('syncOdState').textContent = st;
-      od.classList.toggle('warn', S.odState === 'login' || S.odState === 'error');
-    }
-    const gg = document.getElementById('syncGg');
-    gg.hidden = !ggConnected();
-    if (ggConnected()) {
-      document.getElementById('syncGgState').textContent = S.ggState === 'syncing' ? 'leyendo…'
-        : (S.ggState === 'login' || !ggTokenOk()) && S.gg.syncedAt ? relTime(S.gg.syncedAt)
-        : S.ggState === 'error' ? 'con error'
-        : relTime(S.gg.syncedAt);
-      gg.classList.toggle('warn', S.ggState === 'error');
-    }
+    const busy = S.syncing || S.odState === 'syncing' || S.plState === 'syncing' || S.ggState === 'syncing';
+    const v = S.ui.view;
+    const ts = v === 'trabajo' ? S.pl.syncedAt : v === 'personal' ? (S.data && S.data.syncedAt) : v === 'contactos' ? S.gg.syncedAt : S.od.syncedAt;
+    document.getElementById('syncInfo').textContent = busy ? 'Sincronizando…' : ts ? 'Sincronizado ' + relTime(ts) : '';
+    const warns = [];
+    if (odConnected() && (S.odState === 'login' || S.odState === 'error')) warns.push(['OneDrive', S.odState, odConnect]);
+    if (plConnected() && (S.plState === 'login' || S.plState === 'error')) warns.push(['Planner', S.plState, plConnect]);
+    if (ggConnected() && S.ggState === 'error') warns.push(['Google', 'error', ggRefresh]);
+    const w = document.getElementById('syncWarn');
+    w.hidden = !warns.length;
+    w.replaceChildren(...warns.map(([name, st, fn]) => h('button', { type: 'button', class: 'warn-pill', onclick: st === 'login' ? fn : openSettings, title: st === 'login' ? 'Pulsa para volver a conectar' : 'Revisa la conexión en Ajustes' },
+      name + (st === 'login' ? ': reconectar' : ': error'))));
     const btn = document.getElementById('syncBtn');
     btn.disabled = busy;
     btn.classList.toggle('is-syncing', busy);

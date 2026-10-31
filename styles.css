@@ -70,12 +70,6 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
 .nav-item.disabled { opacity: 0.45; cursor: default; }
 .nav-label { font-size: 11.5px; line-height: 1.2; }
 .sidebar-spacer { flex: 1; }
-.sync-box { display: flex; flex-direction: column; align-items: center; gap: 8px; text-align: center; font-size: 11px; line-height: 1.3; }
-.sync-line { display: flex; flex-direction: column; align-items: center; gap: 1px; }
-.sync-line[hidden] { display: none; }
-.sync-line span:first-child { color: var(--text2); font-weight: 600; }
-.sync-line span:last-child { color: var(--faint); }
-.sync-line.warn span:last-child { color: var(--danger); }
 .hide-btn { align-self: center; flex: 0 0 auto; }
 
 .main { flex: 1; min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
@@ -128,6 +122,9 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
 h1 { margin: 4px 0 0; font-size: 30px; font-weight: 800; letter-spacing: -0.02em; line-height: 1.1; }
 .actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .sync-info { font-size: 13px; color: var(--muted); }
+.sync-warn { display: inline-flex; gap: 6px; flex-wrap: wrap; }
+.sync-warn[hidden] { display: none; }
+.warn-pill { height: 28px; padding: 0 10px; border-radius: 999px; border: 1px solid rgba(240, 133, 122, 0.5); background: rgba(240, 133, 122, 0.12); color: var(--danger); font-size: 12.5px; font-weight: 700; cursor: pointer; }
 
 /* ===== Bandeja de etiquetas ===== */
 .tagbar {
@@ -512,3 +509,13 @@ a.btn { text-decoration: none; }
 .board-empty p { margin: 0; }
 .swatch.static { cursor: default; }
 .pl-labels { max-height: 55vh; overflow-y: auto; }
+
+/* Ventanas bajas: barra lateral compacta para que no necesite desplazamiento */
+@media (max-height: 720px) {
+  .sidebar { gap: 14px; padding-top: calc(14px + env(safe-area-inset-top)); }
+  .brand-mark { width: 64px; height: 64px; border-radius: 16px; }
+  .brand-mark svg { width: 56px; height: 56px; }
+  .nav { gap: 2px; }
+  .nav-item { padding: 7px 4px 6px; gap: 3px; }
+  .nav-tools { padding-top: 10px; }
+}
