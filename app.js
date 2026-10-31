@@ -1678,7 +1678,9 @@
   const PERIODO_NOMBRE = { mensual: 'Mensual', bimestral: 'Bimestral', trimestral: 'Trimestral', semestral: 'Semestral', anual: 'Anual', personalizado: 'Meses elegidos' };
   const MESES_CORTOS = ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'];
   const TOL_ANTES = 15, GRACIA = 20; // días: un pago cubre un vencimiento si cae entre 15 días antes y 20 después
-  let gTab = 'proximos';   // proximos | historial
+  let gTab = 'proximos';   // proximos | historial | resumen
+  let rYear = null;        // año del resumen (null: el actual)
+  let gChart = null;
   let gCat = 'Todas';
   let hYear = 'Todos';
 
@@ -1776,12 +1778,17 @@
       h('span', { class: 'stat-label' }, label), h('span', { class: 'stat-value' }, value), h('span', { class: 'stat-sub' }, sub));
 
     const tabs = h('div', { class: 'seg', role: 'group', 'aria-label': 'Vista' },
-      [['proximos', 'Próximos'], ['historial', 'Historial']].map(([k, label]) =>
+      [['proximos', 'Próximos'], ['historial', 'Historial'], ['resumen', 'Resumen']].map(([k, label]) =>
         h('button', { type: 'button', class: gTab === k ? 'on' : '', 'aria-pressed': gTab === k ? 'true' : 'false', onclick: () => { gTab = k; renderGastos(); } }, label)));
 
     const head = h('div', { class: 'g-toolbar' }, tabs,
       h('button', { type: 'button', class: 'btn ghost small', onclick: () => openPago(null) }, ICON.plus(), 'Registrar pago'));
 
+    if (gChart) { gChart.destroy(); gChart = null; }
+    if (gTab === 'resumen') {
+      root.replaceChildren(head, ...resumenPanels());
+      return;
+    }
     if (gTab === 'historial') {
       root.replaceChildren(head, historialPanel());
       return;
@@ -1829,6 +1836,99 @@
         paused ? h('span', { class: 'ev-until' }, 'pausado')
           : h('span', { class: 'ev-until' + chipCls, title: due ? fmtDay(due) : '' }, due ? dueText(until) + ' · ' + shortDay(due) : 'sin fecha')),
       paused ? h('span') : h('button', { type: 'button', class: 'btn ghost small', onclick: () => openPago(g.id) }, 'Pagar'));
+  }
+
+  // Resumen anual: lo pagado (historial) por mes y categoría, y previsión hasta fin de año
+  function resumenPanels() {
+    const today = todayUtc(), yNow = new Date(today).getUTCFullYear();
+    const all = pagos().filter(p => isYmd(p.fecha));
+    const years = [...new Set(all.map(p => +p.fecha.slice(0, 4)).concat(yNow))].sort((a, b) => b - a);
+    if (!years.includes(rYear)) rYear = yNow;
+    const y = rYear;
+    const delAno = all.filter(p => +p.fecha.slice(0, 4) === y);
+    const pagado = delAno.reduce((a, p) => a + (Number(p.importe) || 0), 0);
+    const meses = y < yNow ? 12 : y === yNow ? new Date(today).getUTCMonth() + 1 : 0;
+    // Pendiente hasta el 31 de diciembre: los vencimientos de cada gasto activo desde su próximo (vencidos incluidos)
+    let pendiente = 0, nPend = 0;
+    if (y === yNow) {
+      const fin = Date.UTC(y, 11, 31);
+      for (const g of gastos().filter(x => x.activo !== false)) {
+        const due = nextDue(g, today);
+        if (due === null) continue;
+        const fechas = new Set(vencimientos(g, y, y).filter(d => d >= due));
+        if (due <= fin) fechas.add(due);
+        for (const d of fechas) if (d <= fin) { pendiente += Number(g.importe) || 0; nPend++; }
+      }
+    }
+    const stat = (label, value, sub, cls) => h('div', { class: 'stat' + (cls ? ' ' + cls : '') },
+      h('span', { class: 'stat-label' }, label), h('span', { class: 'stat-value' }, value), h('span', { class: 'stat-sub' }, sub));
+
+    const yearChips = h('div', { class: 'chips' }, years.map(yr => h('button', {
+      type: 'button', class: 'chip' + (yr === y ? ' on' : ''), style: '--c:#C9D0DC', 'aria-pressed': yr === y ? 'true' : 'false',
+      onclick: () => { rYear = yr; renderGastos(); }
+    }, String(yr))));
+
+    const stats = h('div', { class: 'stats three' },
+      stat('Pagado en ' + y, fmtEur(pagado), delAno.length + (delAno.length === 1 ? ' pago' : ' pagos'), 'accent'),
+      stat('Media mensual', meses ? fmtEur(pagado / meses) : '—', meses ? 'en ' + meses + (meses === 1 ? ' mes' : ' meses') : 'año sin empezar'),
+      y === yNow
+        ? stat('Previsión del año', fmtEur(pagado + pendiente), 'quedan ' + fmtEur(pendiente) + ' en ' + nPend + (nPend === 1 ? ' cobro' : ' cobros'))
+        : stat('Previsión del año', fmtEur(pagado), y < yNow ? 'año cerrado' : 'sin datos'));
+
+    // Por categoría
+    const porCat = {};
+    for (const p of delAno) porCat[p.categoria || 'Otros'] = (porCat[p.categoria || 'Otros'] || 0) + (Number(p.importe) || 0);
+    const cats = Object.entries(porCat).sort((a, b) => b[1] - a[1]);
+    const max = cats.length ? cats[0][1] : 0;
+    const catList = h('div', { class: 'cat-list' }, cats.map(([c, v]) => h('div', { class: 'cat-row' },
+      h('span', { class: 'cat-dot', style: '--c:' + catColor(c) }),
+      h('span', { class: 'cat-name' }, c),
+      h('span', { class: 'cat-bar' }, h('span', { style: 'width:' + (max ? Math.max(2, v / max * 100) : 0).toFixed(1) + '%;--c:' + catColor(c) })),
+      h('span', { class: 'cat-pct' }, (pagado ? Math.round(v / pagado * 100) : 0) + ' %'),
+      h('span', { class: 'ev-amount' }, fmtEur(v)))));
+    if (!cats.length) catList.append(h('p', { class: 'muted empty-note' }, 'No hay pagos registrados en ' + y + '.'));
+
+    // Gráfico: barras apiladas por categoría y línea con el total mensual del año anterior
+    const porMes = cat => Array.from({ length: 12 }, (_, m) => {
+      const v = delAno.filter(p => (p.categoria || 'Otros') === cat && +p.fecha.slice(5, 7) === m + 1).reduce((a, p) => a + (Number(p.importe) || 0), 0);
+      return v ? Math.round(v * 100) / 100 : null;
+    });
+    const prevTotals = Array.from({ length: 12 }, (_, m) => {
+      const v = all.filter(p => +p.fecha.slice(0, 4) === y - 1 && +p.fecha.slice(5, 7) === m + 1).reduce((a, p) => a + (Number(p.importe) || 0), 0);
+      return v ? Math.round(v * 100) / 100 : null;
+    });
+    const hasPrev = prevTotals.some(v => v !== null);
+    const canvas = h('canvas', { 'aria-label': 'Gasto por mes en ' + y + ' por categoría' });
+    const chartPanel = h('section', { class: 'panel' },
+      h('div', { class: 'panel-head' }, h('h2', null, 'Por mes · ' + y),
+        hasPrev ? h('div', { class: 'legend' }, h('span', { class: 'lg line' }, 'Total ' + (y - 1))) : null),
+      cats.length ? h('div', { class: 'chart-box' }, canvas) : h('p', { class: 'muted empty-note' }, 'Sin datos para el gráfico.'));
+    if (cats.length) {
+      loadChart().then(() => {
+        if (!canvas.isConnected) return;
+        if (gChart) gChart.destroy();
+        const datasets = cats.map(([c]) => ({ type: 'bar', label: c, data: porMes(c), backgroundColor: catColor(c), stack: 'pagos', borderRadius: 3, order: 2 }));
+        if (hasPrev) datasets.push({ type: 'line', label: 'Total ' + (y - 1), data: prevTotals, borderColor: 'rgba(201, 208, 220, 0.75)', backgroundColor: 'rgba(201, 208, 220, 0.75)', borderDash: [5, 4], borderWidth: 1.5, pointRadius: 2, tension: 0.25, spanGaps: true, order: 1 });
+        gChart = new Chart(canvas, {
+          data: { labels: MESES_CORTOS, datasets },
+          options: {
+            responsive: true, maintainAspectRatio: false, animation: false,
+            interaction: { mode: 'index', intersect: false },
+            plugins: { legend: { display: false }, tooltip: {
+              filter: it => it.raw !== null,
+              callbacks: { label: ctx => ctx.dataset.label + ': ' + fmtEur(ctx.raw), footer: items => { const t = items.filter(i => i.dataset.type === 'bar').reduce((a, i) => a + (i.raw || 0), 0); return t ? 'Total ' + y + ': ' + fmtEur(t) : ''; } }
+            } },
+            scales: {
+              x: { stacked: true, ticks: { color: '#8A94A6', font: { family: 'Manrope', size: 11 } }, grid: { display: false }, border: { display: false } },
+              y: { stacked: true, beginAtZero: true, ticks: { color: '#8A94A6', font: { family: 'Manrope', size: 11 }, maxTicksLimit: 5, callback: v => v + ' €' }, grid: { color: 'rgba(255, 255, 255, 0.06)' }, border: { display: false } }
+            }
+          }
+        });
+      }).catch(e => toast(e.message, 'error'));
+    }
+
+    return [yearChips, stats, chartPanel,
+      h('section', { class: 'panel' }, h('div', { class: 'panel-head' }, h('h2', null, 'Por categoría · ' + y), h('span', { class: 'panel-total' }, fmtEur(pagado))), catList)];
   }
 
   function historialPanel() {

@@ -412,6 +412,19 @@ body.tag-dragging, body.tag-dragging * { cursor: grabbing !important; }
 }
 .estimate .stat-sub { white-space: normal; }
 
+/* Resumen de gastos */
+.cat-list { display: flex; flex-direction: column; gap: 8px; }
+.cat-row { display: grid; grid-template-columns: 10px minmax(90px, 160px) minmax(0, 1fr) 44px auto; align-items: center; gap: 10px; }
+.cat-name { font-size: 13.5px; font-weight: 700; color: var(--text2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cat-bar { height: 8px; border-radius: 999px; background: rgba(255, 255, 255, 0.05); overflow: hidden; }
+.cat-bar > span { display: block; height: 100%; border-radius: 999px; background: var(--c); }
+.cat-pct { font-size: 12px; color: var(--muted); text-align: right; font-variant-numeric: tabular-nums; }
+.legend .lg.line::before { width: 14px; height: 0; border-radius: 0; background: none; border-top: 2px dashed rgba(201, 208, 220, 0.75); }
+@media (max-width: 700px) {
+  .cat-row { grid-template-columns: 10px minmax(0, 1fr) auto; }
+  .cat-row .cat-bar, .cat-row .cat-pct { display: none; }
+}
+
 /* ===== Consumos ===== */
 .stat.pick { text-align: left; cursor: pointer; font: inherit; color: inherit; transition: border-color 0.12s, background 0.12s; }
 .stat.pick:hover { background: #151C26; }
