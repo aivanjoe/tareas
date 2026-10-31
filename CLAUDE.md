@@ -31,6 +31,7 @@ Encima de las tareas de origen, la app añade su propia capa: **etiquetas con no
   - `styles.css`: todo el diseño. Variables de color en `:root`.
   - `app.js`: toda la lógica, en un IIFE. Sin módulos ES.
   - `Sortable.min.js`: SortableJS 1.15.2 (MIT), incluido en el repo a propósito para no depender de CDN. No sustituir por un enlace a CDN.
+  - `favicon.svg`: icono de la pestaña. `apple-touch-icon.png` (180 px): icono de pantalla de inicio en iPad/iPhone, generado a partir del mismo dibujo.
 - **El navegador habla directamente con las APIs** (Todoist admite CORS desde cualquier origen). No hay servidor intermedio.
 
 ### Almacenamiento en el navegador (localStorage)
@@ -77,6 +78,7 @@ Oscuro y elegante. Tipografía Manrope (Google Fonts) con alternativas del siste
 - Acento principal lima `#DBF266` (botón primario, marca), azul `#7FA2E0` (selección, foco), rojo suave `#F0857A` (errores, borrar).
 - Esquinas redondeadas (9–18 px), bordes de 1 px semitransparentes, sin degradados ni sombras exageradas.
 - Iconos de línea en SVG, sin emojis. Toda la interfaz en español.
+- **Marca:** un vegvísir dibujado en línea, en oscuro `#0B0F15` sobre cuadrado lima redondeado. Es el mismo dibujo detallado en la barra lateral (SVG en línea en `index.html`), en `favicon.svg` y en `apple-touch-icon.png`; se acepta que pierda definición a tamaño pequeño. Si se cambia, cambiar los tres.
 
 ## Convenciones de código
 
@@ -85,7 +87,7 @@ Oscuro y elegante. Tipografía Manrope (Google Fonts) con alternativas del siste
 - Cambios optimistas en pantalla y después la llamada a la API; si falla, avisar con `toast()` y re-sincronizar.
 - Mantener los textos de la interfaz en español y con tono directo.
 - Código legible y comentado en español solo donde aporte.
-- **Versión anti-caché:** en `index.html`, `styles.css` y `app.js` se cargan con `?v=N` (mismo número en ambos). En cada cambio que se suba, incrementar `N` en uno, aunque solo haya cambiado uno de los dos ficheros. `Sortable.min.js` no lleva versión porque no cambia.
+- **Versión anti-caché:** en `index.html`, `styles.css`, `app.js`, `favicon.svg` y `apple-touch-icon.png` se cargan con `?v=N` (mismo número en todos). En cada cambio que se suba, incrementar `N` en uno en todos, aunque solo haya cambiado uno de los ficheros. `Sortable.min.js` no lleva versión porque no cambia.
 
 ## Forma de trabajar con el usuario
 
