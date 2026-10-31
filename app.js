@@ -1232,6 +1232,13 @@
     return 'RRULE:FREQ=MONTHLY;BYMONTH=' + meses + ';BYMONTHDAY=' + dias.join(',') + ';BYSETPOS=-1';
   }
 
+  // Nombre corto para el calendario: nombre de pila y primer apellido (o las dos primeras palabras)
+  function shortName(c) {
+    const pila = (c.nombrePila || '').trim(), ap = (c.apellidos || '').trim();
+    if (pila) return ap ? pila + ' ' + ap.split(/\s+/)[0] : pila;
+    return c.nombre.trim().split(/\s+/).slice(0, 2).join(' ');
+  }
+
   // Eventos que la app debe tener en el calendario, por clave
   function calDesired() {
     const out = new Map();
@@ -1247,13 +1254,13 @@
       const full = /^\d{4}/.test(c.cumple);
       const mmdd = c.cumple.slice(-5);
       const start = full ? c.cumple : year + '-' + (mmdd === '02-29' && !isLeap(year) ? '02-28' : mmdd);
-      ev('cumple:' + c.id, 'Cumpleaños de ' + c.nombre, start, {
+      ev('cumple:' + c.id, shortName(c) + ' · cumpleaños', start, {
         recurrence: [mmdd === '02-29' ? 'RRULE:FREQ=YEARLY;BYMONTH=2;BYMONTHDAY=-1' : 'RRULE:FREQ=YEARLY'], colorId: '4'
       });
       if (!full) continue;
       const birth = utcDay(c.cumple), lived = Math.round((today - birth) / DAY);
       let k = Math.max(5000, Math.ceil(lived / 5000) * 5000);
-      for (let i = 0; i < 2; i++, k += 5000) ev('dias:' + c.id + ':' + k, c.nombre + ' cumple ' + fmtNum(k) + ' días', ymdOf(birth + k * DAY), { colorId: '6' });
+      for (let i = 0; i < 2; i++, k += 5000) ev('dias:' + c.id + ':' + k, shortName(c) + ' · ' + fmtNum(k) + ' días', ymdOf(birth + k * DAY), { colorId: '6' });
     }
     // Gastos marcados para el calendario (activos)
     for (const g of gastos()) {
