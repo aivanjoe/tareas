@@ -4432,6 +4432,20 @@
     Consumos: '#F5D76E', 'Préstamos': '#E68AC4', Alquileres: '#D9A77A', Streaming: '#6FC3E8', Otros: '#9AA4B5' };
   const PERIODOS = { mensual: 1, bimestral: 2, trimestral: 3, semestral: 6, anual: 12 };
   const PERIODO_NOMBRE = { mensual: 'Mensual', bimestral: 'Bimestral', trimestral: 'Trimestral', semestral: 'Semestral', anual: 'Anual', personalizado: 'Meses elegidos' };
+  // Color de un gasto por cada cuánto se cobra (decisión del usuario): verde mensual, amarillo cada 3-4 meses, rojo anual.
+  // Por los meses de cobro al año, así vale también para «Meses elegidos».
+  const PER_COLORES = [[12, '#5FCB86', 'Mensual'], [6, '#B9DA6B', 'Bimestral'], [3, '#F5D76E', 'Trimestral o cuatrimestral'], [2, '#F2A65A', 'Semestral'], [1, '#F0857A', 'Anual']];
+  const perColor = g => {
+    const n = Array.isArray(g.meses) && g.meses.length ? g.meses.length : 12 / (PERIODOS[g.periodicidad] || 1);
+    return (PER_COLORES.find(([m]) => n >= m) || PER_COLORES[PER_COLORES.length - 1])[1];
+  };
+  const perLeyenda = () => h('div', { class: 'legend per-legend' }, PER_COLORES.map(([, c, l]) => h('span', { class: 'lg', style: '--c:' + c }, l)));
+  // Desplegable de categorías (antes, fichas de colores)
+  const catSelect = cats => {
+    const sel = h('select', { class: 'select g-cat', 'aria-label': 'Categoría' }, cats.map(c => h('option', { value: c, selected: gCat === c }, c === 'Todas' ? 'Todas las categorías' : c)));
+    sel.addEventListener('change', () => { gCat = sel.value; renderGastos(); });
+    return sel;
+  };
   const MESES_CORTOS = ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'];
   const TOL_ANTES = 15, GRACIA = 20; // días: un pago cubre un vencimiento si cae entre 15 días antes y 20 después
   let gTab = 'proximos';   // proximos | historial | resumen
@@ -4555,10 +4569,6 @@
 
     const cats = ['Todas'].concat(CATEGORIAS.filter(c => gastos().some(g => g.categoria === c)));
     if (!cats.includes(gCat)) gCat = 'Todas';
-    const chips = h('div', { class: 'chips' }, cats.map(c => h('button', {
-      type: 'button', class: 'chip' + (gCat === c ? ' on' : ''), style: '--c:' + (c === 'Todas' ? '#C9D0DC' : catColor(c)),
-      'aria-pressed': gCat === c ? 'true' : 'false', onclick: () => { gCat = c; renderGastos(); }
-    }, c === 'Todas' ? null : h('span', { class: 'dot' }), c)));
 
     const inCat = x => (gCat === 'Todas' || x.g.categoria === gCat) && (gPer === 'todos' || (gPer === 'mensuales') === esMensual(x.g));
     const perSeg = h('div', { class: 'seg', role: 'group', 'aria-label': 'Periodicidad' },
@@ -4580,7 +4590,7 @@
         stat('Mes que viene', fmtEur(sum(mesQueViene)), mesQueViene.length + (mesQueViene.length === 1 ? ' cobro' : ' cobros') + ' en ' + nombreMes),
         stat('Vencidos', String(vencidos.length), vencidos.length ? fmtEur(sum(vencidos)) + ' sin registrar' : 'todo al día', vencidos.length ? 'danger' : '')),
       head,
-      h('section', { class: 'panel' }, perSeg, chips, list));
+      h('section', { class: 'panel' }, h('div', { class: 'g-filtros' }, perSeg, catSelect(cats), perLeyenda()), list));
   }
 
   function gastoRow(g, due, until, paused) {
@@ -4589,7 +4599,7 @@
     if (g.cobro === 'automatico') sub.push('domiciliado');
     const chipCls = until === null ? '' : until < 0 ? ' late' : until === 0 ? ' now' : until <= 7 ? ' soon' : '';
     return h('div', { class: 'ev gasto' + (paused ? ' paused' : '') + (until !== null && until < 0 ? ' late' : '') },
-      h('span', { class: 'cat-dot', style: '--c:' + catColor(g.categoria), title: g.categoria || 'Otros' }),
+      h('span', { class: 'cat-dot', style: '--c:' + perColor(g), title: PERIODO_NOMBRE[g.periodicidad] || 'Mensual' }),
       h('button', { type: 'button', class: 'ev-main as-btn', onclick: () => openGasto(g.id), title: 'Editar' },
         h('span', { class: 'ev-name' }, g.concepto, g.calendario ? h('span', { class: 'g-cal', title: 'En el calendario', 'aria-label': 'En el calendario' }, ICON.calendar()) : null),
         h('span', { class: 'ev-what' }, sub.join(' · '))),
@@ -4703,10 +4713,7 @@
     const total = shown.reduce((a, p) => a + (Number(p.importe) || 0), 0);
 
     const chips = h('div', { class: 'chips' },
-      cats.map(c => h('button', {
-        type: 'button', class: 'chip' + (gCat === c ? ' on' : ''), style: '--c:' + (c === 'Todas' ? '#C9D0DC' : catColor(c)),
-        'aria-pressed': gCat === c ? 'true' : 'false', onclick: () => { gCat = c; renderGastos(); }
-      }, c === 'Todas' ? null : h('span', { class: 'dot' }), c)),
+      catSelect(cats),
       h('span', { class: 'chips-sep' }),
       years.map(y => h('button', {
         type: 'button', class: 'chip' + (hYear === y ? ' on' : ''), style: '--c:#C9D0DC', 'aria-pressed': hYear === y ? 'true' : 'false',
