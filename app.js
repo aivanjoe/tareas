@@ -1648,10 +1648,11 @@
     }
     // Santos elegidos del santoral de Cumples (uno por nombre, aunque lo lleven varias personas)
     for (const st of santosDeCumples().lista) {
-      if (!st.calendario || !st.personas.length) continue;
+      // Los del santoral, solo si alguien de Cumples se llama así; los añadidos a mano, siempre (decisión del usuario)
+      if (!st.calendario || (!st.personas.length && !st.manual)) continue;
       ev('santo:' + st.clave, santoTitulo(st), year + '-' + (st.fecha === '02-29' && !isLeap(year) ? '02-28' : st.fecha), {
         recurrence: [st.fecha === '02-29' ? 'RRULE:FREQ=YEARLY;BYMONTH=2;BYMONTHDAY=-1' : 'RRULE:FREQ=YEARLY'], colorId: '3',
-        description: 'Lo celebran: ' + st.personas.map(shortName).join(', ') + '.\nCreado por Visir.'
+        description: (st.personas.length ? 'Lo celebran: ' + st.personas.map(shortName).join(', ') + '.\n' : '') + 'Creado por Visir.'
       });
     }
     // Festivos de la lista (Calendario → Festivos): un evento rojo por día
@@ -3937,10 +3938,10 @@
       if (nuevo) {
         const clave = normName(n).replace(/[^a-z ]/g, ' ').replace(/\s+/g, ' ').trim();
         if (!clave) { toast('Escribe el nombre.', 'error'); return; }
-        guardarSanto({ clave, nombre: n, fecha, genero: gen.value, calendario: false, manual: true }, {});
+        guardarSanto({ clave, nombre: n, fecha, genero: gen.value, calendario: true, manual: true }, {}); // a mano: al calendario por defecto
         const st2 = santosDeCumples().lista.find(x => x.clave === clave);
-        if (!st2 || !st2.personas.length) toast('Guardado, pero nadie de los que sigues en Cumples se llama ' + n + '. Márcala en la Agenda con el pastel para que cuente.', 'error', null, 10000);
-        else toast(santoTitulo(st2) + ': ' + st2.personas.map(c => c.nombre).join(', '));
+        if (!st2 || !st2.personas.length) toast('Guardado y puesto en el calendario. Nadie de los que sigues en Cumples se llama ' + n + '.');
+        else toast(santoTitulo(st2) + ' (en el calendario): ' + st2.personas.map(c => c.nombre).join(', '));
       } else guardarSanto(st, { nombre: st.manual ? n : st.nombre, fecha, genero: gen.value });
       close();
       renderCumpledias();
@@ -4023,7 +4024,7 @@
     for (const e of events.slice(0, 20)) {
       const redondo = e.kind === 'dias' && e.value % 5000 === 0;
       const badge = e.kind === 'dias' ? fmtNum(e.value / 1000) + 'k' : e.value === null ? '' : String(e.value);
-      const what = e.kind === 'santo' ? 'Santo de ' + e.st.personas.map(c => c.nombre).join(', ') : e.kind === 'dias' ? 'Cumple ' + fmtNum(e.value) + ' días de vida' : e.value === null ? 'Cumpleaños' : 'Cumple ' + e.value + (e.value === 1 ? ' año' : ' años');
+      const what = e.kind === 'santo' ? (e.st.personas.length ? 'Santo de ' + e.st.personas.map(c => c.nombre).join(', ') : 'Santo') : e.kind === 'dias' ? 'Cumple ' + fmtNum(e.value) + ' días de vida' : e.value === null ? 'Cumpleaños' : 'Cumple ' + e.value + (e.value === 1 ? ' año' : ' años');
       const kind = e.kind === 'santo' ? 'santo' : e.kind === 'cumple' ? 'cumple' : redondo ? 'redondo' : 'dias';
       list.append(h('div', { class: 'ev cd-' + kind + (e.until === 0 ? ' today' : ''), onclick: e.kind === 'santo' ? () => openSanto(e.st) : null },
         h('span', { class: 'ev-badge ' + kind, title: kind === 'santo' ? 'Santo' : kind === 'cumple' ? 'Cumpleaños' : kind === 'redondo' ? 'Cumpledías redondo (múltiplo de 5.000)' : 'Cumpledías' }, kind === 'santo' ? ICON.halo() : badge || ICON.cake()),
