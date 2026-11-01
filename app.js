@@ -2995,10 +2995,9 @@
     if (k.startsWith('santo:')) return SANTO_COLOR;
     if (k.startsWith('festivo:')) return FESTIVO_COLOR;
     if (k.startsWith('senalado:')) return SENALADO_COLOR;
-    if (k.startsWith('tarea:')) return '#DBF266';
     if (k.startsWith('gasto:')) return '#F5D76E';
-    const c = calCfg() && calCfg().color;
-    return isHex(c) ? c : '#7FA2E0';
+    // Tus eventos, en lima (decisión del usuario: con el color del calendario apenas se veían)
+    return '#DBF266';
   }
   const evOrigin = e => (e.key || '').startsWith('cumple:') ? 'Cumpleaños' : (e.key || '').startsWith('dias:') ? 'Cumpledías' : (e.key || '').startsWith('santo:') ? 'Santo' : (e.key || '').startsWith('festivo:') ? 'Festivo' : (e.key || '').startsWith('senalado:') ? 'Día señalado' : (e.key || '').startsWith('gasto:') ? 'Gasto' : (e.key || '').startsWith('tarea:') ? 'Tarea' : '';
   // Día(s) de un evento: los de todo el día ocupan [inicio, fin); los de hora, su día local de inicio
@@ -3093,6 +3092,7 @@
       }, l)));
   }
   const calLeyenda = () => h('div', { class: 'legend cal-legend' },
+    h('span', { class: 'lg', style: '--c:#DBF266' }, 'Tus eventos'),
     h('span', { class: 'lg', style: '--c:#E68AC4' }, 'Cumpleaños'), h('span', { class: 'lg', style: '--c:#F2B35B' }, 'Cumpledías'), h('span', { class: 'lg', style: '--c:' + SANTO_COLOR }, 'Santos'),
     h('span', { class: 'lg', style: '--c:#F5D76E' }, 'Gastos'), h('span', { class: 'lg', style: '--c:' + FESTIVO_COLOR }, 'Festivos'),
     h('span', { class: 'lg', style: '--c:' + SENALADO_COLOR }, 'Días señalados'));
