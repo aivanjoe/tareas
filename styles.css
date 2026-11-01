@@ -670,10 +670,16 @@ a.btn { text-decoration: none; }
 .fest-tipo.t-empresa { background: rgba(127, 162, 224, 0.15); color: var(--blue); }
 .fest-form { display: flex; flex-direction: column; gap: 8px; padding: 10px; border-radius: 10px; border: 1px solid color-mix(in srgb, var(--blue) 45%, transparent); }
 .fest-campos { display: grid; grid-template-columns: 150px minmax(0, 1fr) 130px; gap: 6px; }
+/* Días señalados (en la misma ventana, azul pavo real) */
+.festivos .fest-sec { margin: 14px 0 0; padding-top: 14px; border-top: 1px solid var(--line); font-size: 16px; color: var(--text); }
+.fest-row.sen .fest-fecha { color: #039BE5; }
+.fest-campos.sen { grid-template-columns: minmax(0, 1fr) 170px; }
+.sen-campos { display: flex; gap: 6px; flex-wrap: wrap; }
+.sen-campos .select { flex: 1 1 110px; }
 @media (max-width: 560px) {
   .fest-row { grid-template-columns: 72px minmax(0, 1fr) auto auto; }
   .fest-tipo { display: none; }
-  .fest-campos { grid-template-columns: minmax(0, 1fr); }
+  .fest-campos, .fest-campos.sen { grid-template-columns: minmax(0, 1fr); }
 }
 
 /* Ventana de reconectar */

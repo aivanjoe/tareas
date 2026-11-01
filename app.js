@@ -313,7 +313,8 @@
       case 'repostajes': return 'Repostaje del ' + (r.fecha || '') + ' ' + verbo;
       case 'consumos': return 'Factura de ' + (r.tipo || 'consumo') + (r.fin ? ' hasta ' + r.fin : '') + ' ' + verba;
       case 'santos': return 'Santo ' + q(r.nombre) + ' ' + verbo;
-      case 'festivos': return r.quitado ? 'Festivo oficial del ' + (r.fecha || id) + ' quitado' : 'Festivo ' + q(r.nombre) + ' (' + (r.fecha || id) + ') ' + verbo;
+      case 'diasSenalados': return r.quitado ? 'Día señalado ' + q((SENALADOS_BASE.find(b => b.id === id) || {}).nombre || id) + ' quitado' : 'Día señalado ' + q(r.nombre) + ' ' + verbo;
+      case 'festivos': return r.quitado ?'Festivo oficial del ' + (r.fecha || id) + ' quitado' : 'Festivo ' + q(r.nombre) + ' (' + (r.fecha || id) + ') ' + verbo;
       case 'etiquetas': return 'Etiqueta ' + q(r.name) + ' ' + verba;
       case 'asignaciones': return String(id).startsWith('tmp-') ? null : 'Etiquetas de la tarea ' + tarea(id) + ' cambiadas';
       case 'orden': return 'Orden de las etiquetas cambiado';
@@ -1657,6 +1658,8 @@
     }
     // Festivos de la lista (Calendario → Festivos): un evento rojo por día
     for (const f of festivosLista()) ev('festivo:' + f.fecha, 'Festivo · ' + f.nombre, f.fecha, { colorId: '11' });
+    // Días señalados (no festivos): uno anual por día, en azul pavo real
+    for (const s of senaladosLista()) ev('senalado:' + s.id, s.nombre, senaladoFecha(s, year), { recurrence: [senaladoRRule(s)], colorId: '7' });
     // Gastos marcados para el calendario (activos)
     for (const g of gastos()) {
       if (!g.calendario || g.activo === false) continue;
@@ -2952,12 +2955,13 @@
     if (k.startsWith('dias:')) return '#F2B35B';
     if (k.startsWith('santo:')) return SANTO_COLOR;
     if (k.startsWith('festivo:')) return FESTIVO_COLOR;
+    if (k.startsWith('senalado:')) return SENALADO_COLOR;
     if (k.startsWith('tarea:')) return '#DBF266';
     if (k.startsWith('gasto:')) return '#F5D76E';
     const c = calCfg() && calCfg().color;
     return isHex(c) ? c : '#7FA2E0';
   }
-  const evOrigin = e => (e.key || '').startsWith('cumple:') ? 'Cumpleaños' : (e.key || '').startsWith('dias:') ? 'Cumpledías' : (e.key || '').startsWith('santo:') ? 'Santo' : (e.key || '').startsWith('festivo:') ? 'Festivo' : (e.key || '').startsWith('gasto:') ? 'Gasto' : (e.key || '').startsWith('tarea:') ? 'Tarea' : '';
+  const evOrigin = e => (e.key || '').startsWith('cumple:') ? 'Cumpleaños' : (e.key || '').startsWith('dias:') ? 'Cumpledías' : (e.key || '').startsWith('santo:') ? 'Santo' : (e.key || '').startsWith('festivo:') ? 'Festivo' : (e.key || '').startsWith('senalado:') ? 'Día señalado' : (e.key || '').startsWith('gasto:') ? 'Gasto' : (e.key || '').startsWith('tarea:') ? 'Tarea' : '';
   // Día(s) de un evento: los de todo el día ocupan [inicio, fin); los de hora, su día local de inicio
   function evOnDay(e, ymd) {
     if (e.allDay) return e.start <= ymd && ymd < (e.end || addDays(e.start, 1));
@@ -3050,7 +3054,8 @@
   }
   const calLeyenda = () => h('div', { class: 'legend cal-legend' },
     h('span', { class: 'lg', style: '--c:#E68AC4' }, 'Cumpleaños'), h('span', { class: 'lg', style: '--c:#F2B35B' }, 'Cumpledías'), h('span', { class: 'lg', style: '--c:' + SANTO_COLOR }, 'Santos'),
-    h('span', { class: 'lg', style: '--c:#F5D76E' }, 'Gastos'), h('span', { class: 'lg', style: '--c:#DBF266' }, 'Tareas'), h('span', { class: 'lg', style: '--c:' + FESTIVO_COLOR }, 'Festivos'));
+    h('span', { class: 'lg', style: '--c:#F5D76E' }, 'Gastos'), h('span', { class: 'lg', style: '--c:#DBF266' }, 'Tareas'), h('span', { class: 'lg', style: '--c:' + FESTIVO_COLOR }, 'Festivos'),
+    h('span', { class: 'lg', style: '--c:' + SENALADO_COLOR }, 'Días señalados'));
 
   // Vista de semana (lunes a domingo): cada día con sus eventos con el nombre entero.
   // En el móvil, un día debajo de otro; en pantallas anchas, siete columnas.
@@ -3133,10 +3138,57 @@
     S.datos.colecciones.festivos = Object.assign({}, S.datos.colecciones.festivos, { [f.fecha]: { id: f.fecha, fecha: f.fecha, nombre: f.nombre, tipo: f.tipo } });
   }
 
-  // Ventana «Festivos»: lista por años para revisar, añadir, cambiar y borrar
+  // ---- días señalados (no festivos: Día de la Madre, Día del Padre…) ----
+  // Colección "diasSenalados": { id, nombre, regla: 'fija', mes, dia } o { id, nombre, regla: 'semana', mes, n (1-4, o -1 = último), sem (1 = lunes … 7 = domingo) }.
+  // Un evento anual en azul pavo real (colorId 7), sin sombrear el día. Los de base salen sin guardar nada;
+  // si se quitan quedan como { quitado: true } y si se cambian se guarda el registro.
+  const SENALADO_COLOR = '#039BE5';
+  const SENALADOS_BASE = [
+    { id: 'madre', nombre: 'Día de la Madre', regla: 'semana', mes: 5, n: 1, sem: 7 },
+    { id: 'padre', nombre: 'Día del Padre', regla: 'fija', mes: 3, dia: 19 }
+  ];
+  const DIAS_SEMANA_LARGOS = ['lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado', 'domingo'];
+  const ORDINALES = { 1: 'Primer', 2: 'Segundo', 3: 'Tercer', 4: 'Cuarto', '-1': 'Último' };
+  const senaladoOk = s => s && s.nombre && !s.quitado && s.mes >= 1 && s.mes <= 12 &&
+    (s.regla === 'fija' ? s.dia >= 1 && s.dia <= 31 : s.regla === 'semana' && ORDINALES[s.n] && s.sem >= 1 && s.sem <= 7);
+  function senaladosLista() {
+    const col = S.datos.colecciones.diasSenalados || {};
+    const out = SENALADOS_BASE.map(b => col[b.id] || b);
+    for (const r of Object.values(col)) if (!SENALADOS_BASE.some(b => b.id === r.id)) out.push(r);
+    return out.filter(senaladoOk);
+  }
+  const diasMes = (y, m) => new Date(Date.UTC(y, m, 0)).getUTCDate();
+  // Fecha del día señalado en un año (AAAA-MM-DD)
+  function senaladoFecha(s, y) {
+    const mm = String(s.mes).padStart(2, '0');
+    if (s.regla === 'fija') return y + '-' + mm + '-' + String(Math.min(s.dia, diasMes(y, s.mes))).padStart(2, '0');
+    const jsSem = s.sem % 7; // getUTCDay: 0 = domingo
+    let d;
+    if (s.n > 0) { const pri = new Date(Date.UTC(y, s.mes - 1, 1)).getUTCDay(); d = 1 + (jsSem - pri + 7) % 7 + (s.n - 1) * 7; }
+    else { const ult = diasMes(y, s.mes), u = new Date(Date.UTC(y, s.mes - 1, ult)).getUTCDay(); d = ult - (u - jsSem + 7) % 7; }
+    return y + '-' + mm + '-' + String(d).padStart(2, '0');
+  }
+  function senaladoRRule(s) {
+    if (s.regla === 'semana') return 'RRULE:FREQ=YEARLY;BYMONTH=' + s.mes + ';BYDAY=' + s.n + ['MO', 'TU', 'WE', 'TH', 'FR', 'SA', 'SU'][s.sem - 1];
+    // 29-F y días que no existen en todos los años del mes: el último día del mes
+    return s.dia > 28 && s.dia >= diasMes(2025, s.mes) ? 'RRULE:FREQ=YEARLY;BYMONTH=' + s.mes + ';BYMONTHDAY=-1' : 'RRULE:FREQ=YEARLY';
+  }
+  const senaladoRegla = s => s.regla === 'fija' ? s.dia + ' de ' + MESES_LARGOS[s.mes - 1]
+    : ORDINALES[s.n] + ' ' + DIAS_SEMANA_LARGOS[s.sem - 1] + ' de ' + MESES_LARGOS[s.mes - 1];
+  function guardarSenalado(s) {
+    S.datos.colecciones.diasSenalados = Object.assign({}, S.datos.colecciones.diasSenalados, { [s.id]: s });
+  }
+  function quitarSenalado(id) {
+    const rest = Object.assign({}, S.datos.colecciones.diasSenalados);
+    if (SENALADOS_BASE.some(b => b.id === id)) rest[id] = { id, quitado: true }; else delete rest[id];
+    S.datos.colecciones.diasSenalados = rest;
+  }
+
+  // Ventana «Festivos»: lista por años para revisar, añadir, cambiar y borrar; debajo, los días señalados
   function openFestivos(anioIni) {
     let anio = anioIni || new Date().getFullYear();
     let editando = null; // fecha del festivo que se está editando, o 'nuevo'
+    let editSen = null;  // id del día señalado que se está editando, o 'nuevo'
     const body = h('div', { class: 'form festivos' });
     const diaTxt = ymd => cap(new Date(utcDay(ymd)).toLocaleDateString('es-ES', { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'UTC' })).replace(/\./g, '');
     const formulario = cur => {
@@ -3159,6 +3211,58 @@
         h('div', { class: 'row-actions' }, h('span', { class: 'spacer' }),
           h('button', { type: 'button', class: 'btn subtle small', onclick: () => { editando = null; pinta(); } }, 'Cancelar'),
           h('button', { type: 'button', class: 'btn primary small', onclick: ok }, cur ? 'Guardar' : 'Añadir')));
+    };
+    const formSenalado = cur => {
+      const nombre = h('input', { class: 'input', type: 'text', maxlength: '80', placeholder: 'Nombre (p. ej. San Valentín)', 'aria-label': 'Nombre', autocomplete: 'off', value: cur ? cur.nombre : '' });
+      const regla = h('select', { class: 'select', 'aria-label': 'Cómo se calcula' },
+        h('option', { value: 'fija', selected: !cur || cur.regla === 'fija' }, 'Fecha fija'),
+        h('option', { value: 'semana', selected: !!cur && cur.regla === 'semana' }, 'Día de la semana'));
+      const n = h('select', { class: 'select', 'aria-label': 'Cuál' }, Object.entries(ORDINALES).map(([k, l]) => h('option', { value: k, selected: String(cur && cur.n || 1) === k }, l)));
+      const sem = h('select', { class: 'select', 'aria-label': 'Día de la semana' }, DIAS_SEMANA_LARGOS.map((l, i) => h('option', { value: String(i + 1), selected: (cur && cur.sem || 7) === i + 1 }, l)));
+      const dia = h('select', { class: 'select', 'aria-label': 'Día' }, Array.from({ length: 31 }, (_, i) => h('option', { value: String(i + 1), selected: (cur && cur.dia || 14) === i + 1 }, String(i + 1))));
+      const mes = h('select', { class: 'select', 'aria-label': 'Mes' }, MESES_LARGOS.map((l, i) => h('option', { value: String(i + 1), selected: (cur ? cur.mes : 2) === i + 1 }, 'de ' + l)));
+      const campos = h('div', { class: 'sen-campos' });
+      const ponCampos = () => campos.replaceChildren(...(regla.value === 'fija' ? [dia, mes] : [n, sem, mes]));
+      regla.addEventListener('change', ponCampos); ponCampos();
+      const ok = () => {
+        const nom = nombre.value.trim();
+        if (!nom) { toast('Escribe el nombre.', 'error'); nombre.focus(); return; }
+        const s = { id: cur ? cur.id : uid(), nombre: nom, regla: regla.value, mes: +mes.value };
+        if (s.regla === 'fija') {
+          s.dia = +dia.value;
+          if (s.dia > diasMes(2024, s.mes)) { toast(cap(MESES_LARGOS[s.mes - 1]) + ' no tiene ' + s.dia + ' días.', 'error'); return; }
+        } else { s.n = +n.value; s.sem = +sem.value; }
+        guardarSenalado(s);
+        saveDatos();
+        editSen = null; pinta();
+        if (S.ui.view === 'calendario') renderCal();
+      };
+      nombre.addEventListener('keydown', e => { if (e.key === 'Enter') ok(); });
+      setTimeout(() => nombre.focus(), 30);
+      return h('div', { class: 'fest-form' }, h('div', { class: 'fest-campos sen' }, nombre, regla), campos,
+        h('div', { class: 'row-actions' }, h('span', { class: 'spacer' }),
+          h('button', { type: 'button', class: 'btn subtle small', onclick: () => { editSen = null; pinta(); } }, 'Cancelar'),
+          h('button', { type: 'button', class: 'btn primary small', onclick: ok }, cur ? 'Guardar' : 'Añadir')));
+    };
+    const pintaSenalados = () => {
+      const lista = senaladosLista().map(s => ({ s, fecha: senaladoFecha(s, anio) })).sort((a, b) => a.fecha.localeCompare(b.fecha));
+      const filas = lista.map(({ s, fecha }) => editSen === s.id ? formSenalado(s) : h('div', { class: 'fest-row sen' },
+        h('span', { class: 'fest-fecha' }, diaTxt(fecha)),
+        h('span', { class: 'fest-nombre' }, s.nombre),
+        h('span', { class: 'fest-tipo' }, senaladoRegla(s)),
+        h('button', { type: 'button', class: 'icon-btn mini', 'aria-label': 'Cambiar ' + s.nombre, onclick: () => { editSen = s.id; pinta(); } }, ICON.edit()),
+        h('button', { type: 'button', class: 'icon-btn mini', 'aria-label': 'Quitar ' + s.nombre, onclick: () => {
+          if (!confirm('¿Quitar «' + s.nombre + '» de los días señalados? Se borrará también su evento del calendario.')) return;
+          quitarSenalado(s.id);
+          saveDatos(); pinta(); if (S.ui.view === 'calendario') renderCal();
+        } }, ICON.trash())));
+      return [
+        h('h3', { class: 'fest-sec' }, 'Días señalados'),
+        filas.length ? h('div', { class: 'fest-list' }, filas) : h('p', { class: 'muted empty-note' }, 'Sin días señalados.'),
+        editSen === 'nuevo' ? formSenalado(null) : h('div', { class: 'row-actions' },
+          h('button', { type: 'button', class: 'btn ghost small', onclick: () => { editSen = 'nuevo'; pinta(); } }, ICON.plus(), 'Añadir día señalado')),
+        h('p', { class: 'hint' }, 'No son festivos: salen en tu calendario con su nombre, en azul, cada año en su día (los de día de la semana, como el Día de la Madre, se calculan solos), y no se sombrean.')
+      ];
     };
     const pinta = () => {
       const lista = festivosLista().filter(f => f.fecha.startsWith(anio + '-'));
@@ -3190,11 +3294,12 @@
         filas.length ? h('div', { class: 'fest-list' }, filas) : h('p', { class: 'muted empty-note' }, 'Sin festivos en ' + anio + '.'),
         editando === 'nuevo' ? formulario(null) : h('div', { class: 'row-actions' },
           h('button', { type: 'button', class: 'btn ghost small', onclick: () => { editando = 'nuevo'; pinta(); } }, ICON.plus(), 'Añadir día')),
-        h('p', { class: 'hint' }, 'Cada festivo sale en tu calendario como «Festivo · nombre», en rojo, y el día se sombrea en Visir. Añade aquí también los días que os da la empresa.')
+        h('p', { class: 'hint' }, 'Cada festivo sale en tu calendario como «Festivo · nombre», en rojo, y el día se sombrea en Visir. Añade aquí también los días que os da la empresa.'),
+        ...pintaSenalados()
       ].filter(Boolean)); // replaceChildren escribe «null» si le llega un hueco
     };
     pinta();
-    openModal('Festivos', body);
+    openModal('Festivos y días señalados', body);
   }
 
   // Evento creado por la app: ventana de solo lectura con acceso a lo que lo genera
@@ -3217,6 +3322,10 @@
       const f = festivoDe(id);
       desc = f ? 'Festivo ' + FESTIVO_TIPOS[f.tipo].toLowerCase() + ', de tu lista de festivos.' : 'Festivo de tu lista de festivos.';
       accion = ['Ver festivos', () => openFestivos(+String(id).slice(0, 4))];
+    } else if (tipo === 'senalado') {
+      const s = senaladosLista().find(x => x.id === id);
+      desc = 'Día señalado (no festivo)' + (s ? ': ' + senaladoRegla(s).toLowerCase() + '.' : '.');
+      accion = ['Ver días señalados', () => openFestivos(+String(e.start || '').slice(0, 4) || undefined)];
     } else if (tipo === 'tarea') {
       const t = S.data && S.data.items.find(i => i.id === id);
       desc = 'Tarea de Personal con fecha en el calendario.';
