@@ -2893,7 +2893,7 @@
   // ---- Heima: la parte privada, servida por el NAS de casa y embebida aquí ----
   // La dirección se guarda en el almacén (ajustes → heima), así vale en todos los dispositivos; nunca va en el código.
   // Antes de embeberla se llama a su /api/ping.php: si no responde, no estás en casa (o el NAS no está).
-  const HEIMA_EJEMPLO = 'https://laki.local:8082/';
+  const HEIMA_EJEMPLO = 'https://laki.local:8443/';
   const heimaUrl = () => { const u = ((S.datos.colecciones.ajustes || {}).heima || {}).url || ''; return /^https:\/\/[^\s]+$/.test(u) ? u.replace(/\/?$/, '/') : ''; };
   let heimaEstado = null; // { url, ok, ts }
   async function heimaPing(url) {
