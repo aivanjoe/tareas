@@ -588,6 +588,12 @@
   }
 
   async function runCommands(commands) {
+    S.escribiendo = (S.escribiendo || 0) + 1;
+    S.ultimaEscritura = Date.now();
+    try { return await runCommandsRaw(commands); }
+    finally { S.escribiendo--; S.ultimaEscritura = Date.now(); }
+  }
+  async function runCommandsRaw(commands) {
     const todos = commands.map(describeCmd);
     const desc = todos.length > 1 && todos.some(d => d !== 'Tareas reordenadas') ? todos.filter(d => d !== 'Tareas reordenadas') : todos;
     const resumen = desc.length === 1 ? desc[0] : desc.every(d => d === desc[0]) ? desc[0] : plural(desc.length, 'cambio') + ' en Todoist';
@@ -610,11 +616,16 @@
   async function doSync(opts = {}) {
     if (S.syncing || !S.token) return null;
     S.syncing = true;
-    renderSyncState();
-    let res = null;
+    if (!opts.auto) renderSyncState();
+    let res = null, cambio = true;
+    const t0 = Date.now();
     try {
       const prev = S.data;
-      S.data = await fetchAll();
+      const nuevo = await fetchAll();
+      // Automático: si mientras tanto hiciste un cambio, esta copia ya no vale (se lee en la próxima vuelta)
+      if (opts.auto && (S.escribiendo || (S.ultimaEscritura || 0) >= t0)) { cambio = false; return null; }
+      cambio = !prev || tdFirma(prev) !== tdFirma(nuevo);
+      S.data = nuevo;
       saveCache();
       const det = !prev ? [] : difLista(prev.items, S.data.items, i => cleanTitle(i.content), i => i.content + '|' + (i.section_id || '') + '|' + i.project_id)
         .map(([k, n]) => (k === 'nuevo' ? 'Tarea nueva: «' : k === 'fuera' ? 'Tarea completada o borrada: «' : 'Tarea cambiada: «') + n + '»');
@@ -622,15 +633,49 @@
       if (!prev) res.texto = 'Todoist: ' + plural(S.data.items.length, 'tarea leída', 'tareas leídas');
       if (!opts.silent) toast('Sincronizado con Todoist');
     } catch (e) {
+      // Automático: un fallo de red no avisa ni se apunta (se reintenta en la próxima vuelta); el token inválido, sí
+      if (opts.auto && e.kind !== 'auth') { cambio = false; return null; }
       res = finSync('todoist', opts, null, e.message, e.kind === 'auth' ? 'login' : e.kind);
       toast(e.message, 'error');
       if (e.kind === 'auth') openSetup(e.message);
     } finally {
       S.syncing = false;
-      renderAll();
+      if (!opts.auto) renderAll();
+      else {
+        renderSyncState();
+        // Solo se repinta lo de Todoist y solo si ha cambiado algo; si mientras leía te has puesto a escribir
+        // o has abierto algo, se deja para cuando termines (no se pierde lo que estás escribiendo)
+        if (cambio && S.data) { if (tdOcupadoUI()) S.tdRepintar = true; else tdRepintar(); }
+      }
     }
     return res;
   }
+  const tdFirma = d => JSON.stringify([d.projects, d.sections, d.items.map(i => [i.id, i.content, i.section_id, i.project_id, i.child_order]), (d.notes || []).map(n => [n.id, n.content])]);
+
+  // ---- refresco automático de Todoist (decisión del usuario: la única fuente que se pone al día sola) ----
+  // Cada minuto con la pestaña visible, al volver a ella y al abrir la app. No se lanza mientras arrastras,
+  // tienes abierto el panel de una tarea, una ventana o estás escribiendo, ni con un cambio tuyo enviándose.
+  const TD_AUTO_MS = 60000;
+  function tdRepintar() {
+    S.tdRepintar = false;
+    if (VIEWS[S.ui.view] && VIEWS[S.ui.view].board && !isWork()) { renderProjects(); renderTagbar(); renderBoard(); }
+    else if (S.ui.view === 'compra') renderCompra();
+  }
+  const tdOcupado = () => !!(S.escribiendo || S.syncing) || tdOcupadoUI();
+  function tdOcupadoUI() {
+    if (S.editing) return true;
+    if (document.querySelector('#modalRoot .modal-wrap, .card-drag, .card-chosen, .sortable-chosen, .sortable-fallback')) return true;
+    const a = document.activeElement;
+    return !!(a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName));
+  }
+  function tdAuto() {
+    if (!S.token || document.visibilityState !== 'visible' || tdOcupado()) return;
+    if (S.tdRepintar) tdRepintar();
+    if (S.data && Date.now() - (S.data.syncedAt || 0) < TD_AUTO_MS - 5000) return;
+    doSync({ silent: true, auto: true });
+  }
+  setInterval(tdAuto, 15000); // comprueba a menudo, lee como mucho una vez por minuto (y en cuanto dejas de estar ocupado)
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') tdAuto(); });
 
   // Fechas de las tareas: la de Todoist (inicio, con o sin hora) manda; lo que dura va en Visir
   // (colección "duracionTareas": { id, dias } o { id, min }), porque la duración de Todoist es de pago.
@@ -5837,7 +5882,8 @@
       // Al cambiar de día se recalculan los cumpledías
       const cfg = VIEWS[S.ui.view];
       const el = cfg && cfg.el && document.getElementById(cfg.el);
-      if (el && !el.hidden && el.dataset.day !== String(todayUtc())) cfg.render();
+      const escribiendo = el && el.contains(document.activeElement) && /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName);
+      if (el && !el.hidden && !escribiendo && el.dataset.day !== String(todayUtc())) cfg.render();
     }, 60000);
   }
 
@@ -5848,6 +5894,7 @@
   const compraItems = () => { const p = compraProyecto(); return p ? S.data.items.filter(i => i.project_id === p.id && !i.parent_id).sort((a, b) => a.child_order - b.child_order) : []; };
   function renderCompra() {
     const root = document.getElementById('viewCompra');
+    root.dataset.day = String(todayUtc()); // si no, el repaso de cada minuto la repintaba (y borraba lo que estuvieras escribiendo)
     const nota = (msg, label, fn) => root.replaceChildren(h('section', { class: 'panel' }, h('p', { class: 'muted empty-note' }, msg),
       label ? h('div', { class: 'row-actions' }, h('button', { type: 'button', class: 'btn primary small', onclick: fn }, label)) : null));
     if (!S.token) return nota('Conecta Todoist para ver aquí tu lista de la compra.', 'Ir a Ajustes', openSettings);
@@ -6021,6 +6068,7 @@
     if (S.od.clientId) loadMsal().catch(() => {});
     if (!S.token) openSetup();
     else if (!S.data) doSync({ silent: true });
+    else tdAuto(); // al abrir la app, Todoist se pone al día solo
   }
 
   if (typeof Sortable === 'undefined') {
