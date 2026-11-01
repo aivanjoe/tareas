@@ -321,7 +321,8 @@
       case 'cumpledias': return kind === 'baja' ? 'Dejar de seguir en Cumples: ' + contacto(id) : kind === 'alta' ? 'Seguir en Cumples: ' + contacto(id) : null;
       case 'personas': return 'Persona ' + q(r.name) + ' ' + verba;
       case 'coloresContactos': return 'Color de la categoría ' + q((grupoMap()[id]) || id) + ' cambiado';
-      case 'fechasTareas': return 'Fecha en el calendario de la tarea ' + tarea(id) + (kind === 'baja' ? ' quitada' : kind === 'alta' ? ' puesta' : ' cambiada');
+      case 'fechasTareas': return kind === 'baja' ? 'Fecha de la tarea ' + tarea(id) + ' pasada a Todoist' : 'Fecha en el calendario de la tarea ' + tarea(id) + (kind === 'alta' ? ' puesta' : ' cambiada');
+      case 'duracionTareas': return kind === 'baja' ? 'Duración de la tarea ' + tarea(id) + ' quitada' : 'Duración de la tarea ' + tarea(id) + ': ' + (r.dias ? r.dias + ' días' : r.min + ' min');
       case 'ajustes': return id === 'calendario' ? 'Calendario elegido: ' + q(r.nombre) : 'Ajuste ' + q(id) + ' ' + verbo;
       default: return n + ' ' + q(id) + ' ' + verbo;
     }
@@ -538,7 +539,8 @@
       section_id: i.section_id || null,
       parent_id: i.parent_id || null,
       child_order: i.child_order || 0,
-      recurring: !!(i.due && i.due.is_recurring)
+      recurring: !!(i.due && i.due.is_recurring),
+      due: i.due && i.due.date ? { date: i.due.date, string: i.due.string || '' } : null
     }));
     // Comentarios de tareas activas
     const active = new Set(items.map(i => i.id));
@@ -557,6 +559,7 @@
       sections: sections.map(s => ({ id: s.id, name: s.name, project_id: s.project_id, order: s.section_order || 0 })),
       items,
       notes,
+      conFechas: true, // copia con las fechas de Todoist (las anteriores no las traían)
       inboxId,
       syncedAt: Date.now()
     };
@@ -570,7 +573,9 @@
     const notaTarea = id => { const n = S.data && (S.data.notes || []).find(x => x.id === id); return n ? t(n.item_id) : 'una tarea'; };
     switch (c.type) {
       case 'item_add': return 'Tarea creada: ' + q(cleanTitle(a.content));
-      case 'item_update': return 'Tarea renombrada: ' + q(cleanTitle(a.content));
+      case 'item_update': return a.content === undefined && 'due' in a
+        ? (a.due ? 'Fecha de la tarea ' + t(a.id) + ': ' + a.due.date.replace('T', ' ').slice(0, 16) : 'Fecha de la tarea ' + t(a.id) + ' quitada')
+        : 'Tarea renombrada: ' + q(cleanTitle(a.content));
       case 'item_move': return 'Tarea ' + t(a.id) + ' movida a ' + (a.section_id ? sec(a.section_id) : '«Sin sección»');
       case 'item_reorder': return 'Tareas reordenadas';
       case 'item_close': return 'Tarea completada: ' + t(a.id);
@@ -611,6 +616,9 @@
       const prev = S.data;
       S.data = await fetchAll();
       saveCache();
+      await migrarFechasTareas();
+      // Fuera de la sincronización manual (que pone al día el calendario después), si cambian las fechas
+      if (!opts.manual && firmaFechas(prev) !== firmaFechas(S.data)) calSchedule();
       const det = !prev ? [] : difLista(prev.items, S.data.items, i => cleanTitle(i.content), i => i.content + '|' + (i.section_id || '') + '|' + i.project_id)
         .map(([k, n]) => (k === 'nuevo' ? 'Tarea nueva: «' : k === 'fuera' ? 'Tarea completada o borrada: «' : 'Tarea cambiada: «') + n + '»');
       res = finSync('todoist', opts, det);
@@ -625,6 +633,50 @@
       renderAll();
     }
     return res;
+  }
+
+  // Fechas de las tareas: la de Todoist (inicio, con o sin hora) manda; lo que dura va en Visir
+  // (colección "duracionTareas": { id, dias } o { id, min }), porque la duración de Todoist es de pago.
+  const pad2 = n => String(n).padStart(2, '0');
+  function dueDe(item) {
+    const d = item && item.due;
+    if (d && d.date) {
+      if (d.date.length <= 10) return { ymd: d.date, hm: '' };
+      if (/Z$/.test(d.date)) { const x = new Date(d.date); return { ymd: localYmd(x), hm: pad2(x.getHours()) + ':' + pad2(x.getMinutes()) }; }
+      return { ymd: d.date.slice(0, 10), hm: d.date.slice(11, 16) };
+    }
+    // Fecha guardada solo en Visir por una versión anterior, mientras no se pase a Todoist
+    const f = item && (S.datos.colecciones.fechasTareas || {})[item.id];
+    return f && isYmd(f.fecha) ? { ymd: f.fecha, hm: '' } : null;
+  }
+  // Inicio y fin de la tarea en el calendario: { ymd, hm, finYmd, finHm } (fin: día siguiente al último, como Google)
+  function fechaTarea(item) {
+    const d = dueDe(item);
+    if (!d) return null;
+    const dur = (S.datos.colecciones.duracionTareas || {})[item.id] || {};
+    if (!d.hm) return Object.assign(d, { finYmd: addDays(d.ymd, Math.max(1, dur.dias || 1)), finHm: '' });
+    const ini = new Date(d.ymd + 'T' + d.hm + ':00'), fin = new Date(ini.getTime() + Math.max(1, dur.min || 60) * 60000);
+    return Object.assign(d, { finYmd: localYmd(fin), finHm: pad2(fin.getHours()) + ':' + pad2(fin.getMinutes()) });
+  }
+  const esCompra = item => { const p = compraProyecto(); return !!p && item.project_id === p.id; };
+  const firmaFechas = data => !data ? '' : data.items.filter(i => i.due).map(i => i.id + '|' + i.due.date + '|' + i.content).sort().join();
+  // Una vez: las fechas que una versión anterior guardaba solo en Visir pasan a ser la fecha de Todoist
+  async function migrarFechasTareas() {
+    const col = S.datos.colecciones.fechasTareas;
+    const ids = new Set(S.data.items.map(i => i.id));
+    const durs = S.datos.colecciones.duracionTareas || {};
+    const sobran = Object.keys(durs).filter(id => !ids.has(id) && !id.startsWith('tmp-'));
+    if (sobran.length) { const r = Object.assign({}, durs); for (const id of sobran) delete r[id]; S.datos.colecciones.duracionTareas = r; saveDatos(); }
+    if (!col || !Object.keys(col).length) return;
+    const cmds = [];
+    for (const f of Object.values(col)) {
+      const it = S.data.items.find(i => i.id === f.id);
+      if (it && !it.due && isYmd(f.fecha)) { cmds.push({ type: 'item_update', uuid: uid(), args: { id: it.id, due: { date: f.fecha } } }); it.due = { date: f.fecha, string: '' }; }
+    }
+    try { if (cmds.length) await runCommands(cmds); }
+    catch (e) { toast('No se pudieron pasar las fechas de las tareas a Todoist: ' + e.message, 'error'); return; }
+    S.datos.colecciones.fechasTareas = {};
+    saveCache(); saveDatos();
   }
 
   // Si una escritura falla, se vuelve a leer Todoist para dejar el tablero como está de verdad
@@ -1667,15 +1719,21 @@
       if (first === undefined) continue;
       ev('gasto:' + g.id, g.concepto, ymdOf(first), { recurrence: [gastoRRule(g)], colorId: '5' });
     }
-    // Tareas de Personal con fecha (solo si la tarea sigue en Todoist)
-    for (const f of Object.values(S.datos.colecciones.fechasTareas || {})) {
-      const t = S.data && S.data.items.find(i => i.id === f.id);
-      if (t && isYmd(f.fecha)) ev('tarea:' + f.id, cleanTitle(t.content), f.fecha, { colorId: '2' });
+    // Tareas de Personal con fecha de Todoist (menos las de la compra), con hora si la tienen y lo que duren
+    if (S.data && S.data.conFechas) for (const t of S.data.items) {
+      if (String(t.id).startsWith('tmp-') || esCompra(t)) continue;
+      const f = fechaTarea(t);
+      if (!f) continue;
+      if (!f.hm) { ev('tarea:' + t.id, cleanTitle(t.content), f.ymd, { colorId: '2', end: { date: f.finYmd } }); continue; }
+      const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+      ev('tarea:' + t.id, cleanTitle(t.content), f.ymd, { colorId: '2', transparency: 'opaque',
+        start: { dateTime: f.ymd + 'T' + f.hm + ':00', timeZone: tz }, end: { dateTime: f.finYmd + 'T' + f.finHm + ':00', timeZone: tz } });
     }
     return out;
   }
 
-  const calSame = (e, d) => e.summary === d.summary && (e.start || {}).date === d.start.date && (e.end || {}).date === d.end.date &&
+  const calT = x => (x && x.date || '') + '|' + (x && x.dateTime ? Date.parse(x.dateTime) : '');
+  const calSame = (e, d) => e.summary === d.summary && calT(e.start) === calT(d.start) && calT(e.end) === calT(d.end) && (e.transparency || 'opaque') === (d.transparency || 'opaque') &&
     (e.recurrence || []).join() === (d.recurrence || []).join() && (e.colorId || '') === (d.colorId || '') && (e.description || '') === (d.description || '');
 
   // Deja los eventos de la app como mandan los datos: crea, cambia o borra solo los suyos
@@ -1694,7 +1752,7 @@
     for (const e of mine) {
       const key = ((e.extendedProperties || {}).private || {}).mpKey;
       // Sin datos de Todoist cargados no se tocan los eventos de tareas
-      if (key && key.startsWith('tarea:') && !S.data) { seen.add(key); continue; }
+      if (key && key.startsWith('tarea:') && !(S.data && S.data.conFechas)) { seen.add(key); continue; }
       const d = want.get(key);
       if (!d || seen.has(key)) { await ggCall('DELETE', CALAPI + 'calendars/' + cid + '/events/' + encodeURIComponent(e.id)); cambios.push('Evento de Visir borrado: «' + (e.summary || '') + '»'); continue; }
       seen.add(key);
@@ -1951,15 +2009,21 @@
     }
   }
 
+  // «5 nov», «5 nov, 21:00», «5 – 9 nov»
+  function fechaTxt(f) {
+    const ult = f.hm ? f.finYmd : addDays(f.finYmd, -1);
+    return fmtDay(utcDay(f.ymd)) + (f.hm ? ', ' + f.hm : '') + (ult !== f.ymd ? ' – ' + fmtDay(utcDay(ult)) + (f.hm ? ', ' + f.finHm : '') : '');
+  }
+
   function renderCard(item) {
     const tags = assigned(item.id).map(tagById);
     const pending = item.id.startsWith('tmp-');
     const work = isWork();
     const hasNotes = work ? item.hasDescription : (S.data.notes || []).some(n => n.item_id === item.id);
-    const hasFecha = !work && !!(S.datos.colecciones.fechasTareas || {})[item.id];
+    const fechaCal = !work && fechaTarea(item);
+    const hasFecha = !!fechaCal;
     const title = work ? item.title : cleanTitle(item.content);
     const notesLabel = work ? 'Tiene notas' : 'Tiene comentarios';
-    const fechaCal = !work && ((S.datos.colecciones.fechasTareas || {})[item.id] || {}).fecha;
     return h('div', {
       class: 'card' + (pending ? ' pending' : '') + (hasNotes || hasFecha ? ' has-notes' : ''),
       dataset: { taskId: item.id },
@@ -1974,7 +2038,7 @@
         onclick: () => { if (!pending) openEdit(item.id); }
       }, title),
       hasNotes || fechaCal ? h('span', { class: 'card-notes' },
-        fechaCal ? h('span', { class: 'card-cal', title: 'En el calendario: ' + fmtDay(utcDay(fechaCal)), 'aria-label': 'En el calendario el ' + fmtDay(utcDay(fechaCal)) }, ICON.calendar()) : null,
+        fechaCal ? h('span', { class: 'card-cal', title: 'En el calendario: ' + fechaTxt(fechaCal), 'aria-label': 'En el calendario el ' + fechaTxt(fechaCal) }, ICON.calendar()) : null,
         hasNotes ? h('span', { title: notesLabel, 'aria-label': notesLabel }, ICON.comment()) : null) : null,
       tags.length ? h('span', { class: 'card-tags' },
         tags.map(t => h('span', { class: 'mini-tag', style: '--c:' + t.color }, t.name))) : null
@@ -2023,9 +2087,8 @@
     if (idx < 0) return;
     const [item] = S.data.items.splice(idx, 1);
     saveCache();
-    // Si tenía fecha en el calendario, su evento se borra (se recupera al deshacer)
-    const fecha = !item.recurring && (S.datos.colecciones.fechasTareas || {})[id];
-    if (fecha) { const rest = Object.assign({}, S.datos.colecciones.fechasTareas); delete rest[id]; S.datos.colecciones.fechasTareas = rest; saveDatos(); item._fecha = fecha; }
+    // Si tenía fecha, su evento se borra (vuelve al deshacer; en las recurrentes pasa a la siguiente fecha)
+    const conFecha = !!dueDe(item);
     renderBoard();
     renderProjects();
     const undo = item.recurring ? null : { label: 'Deshacer', fn: () => undoComplete(item) };
@@ -2033,18 +2096,16 @@
     try {
       await runCommands([{ type: 'item_close', uuid: uid(), args: { id } }]);
       if (item.recurring) await doSync({ silent: true });
+      else if (conFecha) calSchedule();
     } catch (e) { await recover(e); }
   }
 
   async function undoComplete(item) {
-    const fecha = item._fecha;
-    delete item._fecha;
     S.data.items.push(item);
     saveCache();
-    if (fecha) { S.datos.colecciones.fechasTareas = Object.assign({}, S.datos.colecciones.fechasTareas, { [item.id]: fecha }); saveDatos(); }
     renderBoard();
     renderProjects();
-    try { await runCommands([{ type: 'item_uncomplete', uuid: uid(), args: { id: item.id } }]); }
+    try { await runCommands([{ type: 'item_uncomplete', uuid: uid(), args: { id: item.id } }]); if (dueDe(item)) calSchedule(); }
     catch (e) { await recover(e); }
   }
 
@@ -2123,7 +2184,7 @@
   // ---------- panel de tarea (nueva / editar) ----------
   function openNew(sectionKey, fromHeader) {
     if (!boardReady()) return;
-    S.editing = { mode: 'new', sectionKey, fromHeader, name: '', tagIds: [], work: isWork(), fecha: '' };
+    S.editing = { mode: 'new', sectionKey, fromHeader, name: '', tagIds: [], work: isWork(), fecha: '', hora: '', hastaF: '', hastaH: '' };
     renderDrawer();
   }
 
@@ -2131,8 +2192,12 @@
     const item = isWork() ? plTask(taskId) : S.data.items.find(i => i.id === taskId);
     if (!item) return;
     const name = isWork() ? item.title : item.content;
-    const f = !isWork() && (S.datos.colecciones.fechasTareas || {})[taskId];
-    S.editing = { mode: 'edit', taskId, name, original: name, tagIds: assigned(taskId).slice(), work: isWork(), fecha: f ? f.fecha : '' };
+    const f = !isWork() && fechaTarea(item);
+    const ult = f && (f.hm ? f.finYmd : addDays(f.finYmd, -1));
+    const conDur = !!(S.datos.colecciones.duracionTareas || {})[taskId];
+    S.editing = { mode: 'edit', taskId, name, original: name, tagIds: assigned(taskId).slice(), work: isWork(), recurring: !isWork() && item.recurring, dueTxt: (item.due && item.due.string) || '',
+      fecha: f ? f.ymd : '', hora: f ? f.hm : '', hastaF: f && conDur ? ult : '', hastaH: f && f.hm && conDur ? f.finHm : '' };
+    S.editing.orig = { fecha: S.editing.fecha, hora: S.editing.hora, hastaF: S.editing.hastaF, hastaH: S.editing.hastaH };
     renderDrawer();
   }
 
@@ -2182,15 +2247,35 @@
     drawChips();
 
     const commentsField = ed.mode === 'edit' && !ed.taskId.startsWith('tmp-') ? (isWork() ? plNotesSection(ed) : commentsSection(ed.taskId)) : null;
-    // Fecha en el calendario (Personal): crea un evento de todo el día en Google Calendar
+    // Fecha (Personal): es la fecha de Todoist; con ella la tarea sale en el calendario. «Hasta» (lo que dura) va en Visir
     let fechaField = null;
     if (!isWork()) {
-      const inp = h('input', { class: 'input', id: 'taskFecha', type: 'date', value: ed.fecha || '' });
-      inp.addEventListener('change', () => { ed.fecha = inp.value; });
+      const rec = ed.recurring;
+      const inp = (id, type, k, label) => {
+        const x = h('input', { class: 'input', id, type, value: ed[k] || '', 'aria-label': label, disabled: rec && (k === 'fecha' || k === 'hora') });
+        x.addEventListener('change', () => { ed[k] = x.value; if (k === 'hora' || k === 'fecha') pintaHasta(); });
+        return x;
+      };
+      const fF = inp('taskFecha', 'date', 'fecha', 'Fecha'), fH = inp('taskHora', 'time', 'hora', 'Hora (opcional)');
+      const hF = inp('taskHastaF', 'date', 'hastaF', 'Hasta el día'), hH = inp('taskHastaH', 'time', 'hastaH', 'Hasta la hora');
+      const hasta = h('div', { class: 'fecha-fila' });
+      const pintaHasta = () => {
+        hH.hidden = !ed.hora;
+        hasta.hidden = !ed.fecha;
+      };
+      hasta.append(h('span', { class: 'fecha-hasta' }, 'Hasta'), hF, hH);
+      pintaHasta();
       fechaField = h('div', { class: 'field' },
-        h('label', { class: 'field-label', for: 'taskFecha' }, 'Fecha en el calendario'),
-        h('div', { class: 'row-edit two' }, inp, h('button', { type: 'button', class: 'btn subtle small', onclick: () => { inp.value = ''; ed.fecha = ''; } }, 'Quitar')),
-        h('p', { class: 'hint' }, calReady() ? 'Crea un evento con el nombre de la tarea en tu calendario. Al completar la tarea, el evento se borra.' : 'Se guardará y aparecerá en el calendario cuando conectes Google Calendar en Ajustes.'));
+        h('label', { class: 'field-label', for: 'taskFecha' }, 'Fecha'),
+        h('div', { class: 'fecha-fila' }, fF, fH, rec ? null : h('button', { type: 'button', class: 'btn subtle small', onclick: () => {
+          for (const k of ['fecha', 'hora', 'hastaF', 'hastaH']) ed[k] = '';
+          for (const x of [fF, fH, hF, hH]) x.value = '';
+          pintaHasta();
+        } }, 'Quitar')),
+        hasta,
+        h('p', { class: 'hint' }, rec ? 'Tarea que se repite' + (ed.dueTxt ? ' («' + ed.dueTxt + '»)' : '') + ': la fecha se cambia en Todoist. Sale en el calendario en su próxima fecha.'
+          : (calReady() ? 'Es la fecha de la tarea en Todoist y sale en tu calendario. La hora es opcional; «Hasta», para lo que dura varios días (un viaje) o la hora de fin. Al completar la tarea, el evento se borra.'
+            : 'Es la fecha de la tarea en Todoist. Saldrá en el calendario cuando conectes Google Calendar en Ajustes.')));
     }
 
     let columnField = null;
@@ -2346,6 +2431,26 @@
     catch (e) { await recover(e); }
   }
 
+  // Fecha del panel de la tarea → { due: { date } | null, dur: { dias } | { min } | null }, o el texto del error
+  function leerFecha(ed) {
+    if (!isYmd(ed.fecha)) {
+      if (ed.recurring) return { due: null, dur: null };
+      return ed.hora || ed.hastaF || ed.hastaH ? 'Pon la fecha de inicio.' : { due: null, dur: null };
+    }
+    if (!ed.hora) {
+      const dias = isYmd(ed.hastaF) ? Math.round((utcDay(ed.hastaF) - utcDay(ed.fecha)) / DAY) + 1 : 1;
+      if (dias < 1) return 'La fecha «Hasta» es anterior a la de inicio.';
+      return { due: { date: ed.fecha }, dur: dias > 1 ? { dias } : null };
+    }
+    const ini = new Date(ed.fecha + 'T' + ed.hora + ':00');
+    let fin = ed.hastaF || ed.hastaH ? new Date((isYmd(ed.hastaF) ? ed.hastaF : ed.fecha) + 'T' + (ed.hastaH || ed.hora) + ':00') : null;
+    // Solo la hora de fin y antes que la de inicio: acaba al día siguiente
+    if (fin && !ed.hastaF && fin <= ini) fin = new Date(fin.getTime() + DAY);
+    const min = fin ? Math.round((fin - ini) / 60000) : 60;
+    if (min <= 0) return 'El final es anterior al inicio.';
+    return { due: { date: ed.fecha + 'T' + ed.hora + ':00' }, dur: min !== 60 ? { min } : null };
+  }
+
   async function saveDrawer() {
     const ed = S.editing;
     if (!ed) return;
@@ -2355,14 +2460,16 @@
       return;
     }
     const tagIds = ed.tagIds.filter(id => tagById(id));
+    const fx = ed.work ? null : leerFecha(ed);
+    if (typeof fx === 'string') { toast(fx, 'error'); return; }
     closeDrawer();
     if (ed.work) return plSaveDrawer(ed, name, tagIds);
-    const setFecha = (id, fecha) => {
-      const cur = (S.datos.colecciones.fechasTareas || {})[id];
-      if ((cur ? cur.fecha : '') === (fecha || '')) return;
-      const rest = Object.assign({}, S.datos.colecciones.fechasTareas);
-      if (isYmd(fecha)) rest[id] = { id, fecha }; else delete rest[id];
-      S.datos.colecciones.fechasTareas = rest;
+    const setDur = (id, dur) => {
+      const cur = (S.datos.colecciones.duracionTareas || {})[id];
+      if (JSON.stringify(cur ? { dias: cur.dias, min: cur.min } : null) === JSON.stringify(dur ? { dias: dur.dias, min: dur.min } : null)) return;
+      const rest = Object.assign({}, S.datos.colecciones.duracionTareas);
+      if (dur) rest[id] = Object.assign({ id }, dur); else delete rest[id];
+      S.datos.colecciones.duracionTareas = rest;
       saveDatos();
     };
 
@@ -2371,12 +2478,18 @@
       if (!item) return;
       S.tags.assign[ed.taskId] = tagIds;
       saveTags();
-      setFecha(ed.taskId, ed.fecha);
       const renamed = name !== ed.original.trim();
-      if (renamed) { item.content = name; saveCache(); }
+      const dueChanged = !ed.recurring && (ed.fecha !== ed.orig.fecha || ed.hora !== ed.orig.hora);
+      if (renamed) item.content = name;
+      if (dueChanged) item.due = fx.due ? { date: fx.due.date, string: '' } : null;
+      if (renamed || dueChanged) saveCache();
+      setDur(ed.taskId, fx.due || ed.recurring ? fx.dur : null);
       renderBoard();
-      if (renamed) {
-        try { await runCommands([{ type: 'item_update', uuid: uid(), args: { id: item.id, content: name } }]); calSchedule(); }
+      const cmds = [];
+      if (renamed) cmds.push({ type: 'item_update', uuid: uid(), args: { id: item.id, content: name } });
+      if (dueChanged) cmds.push({ type: 'item_update', uuid: uid(), args: { id: item.id, due: fx.due } });
+      if (cmds.length) {
+        try { await runCommands(cmds); calSchedule(); }
         catch (e) { await recover(e); }
       }
       return;
@@ -2388,7 +2501,7 @@
     const sectionId = ed.sectionKey === 'none' ? null : ed.sectionKey;
     // Las tareas nuevas van arriba del todo de su sección (decisión del usuario)
     const siblings = S.data.items.filter(i => i.project_id === pid && (i.section_id || null) === sectionId && !i.parent_id).sort((a, b) => a.child_order - b.child_order);
-    const item = { id: tempId, content: name, project_id: pid, section_id: sectionId, parent_id: null, child_order: 1, recurring: false };
+    const item = { id: tempId, content: name, project_id: pid, section_id: sectionId, parent_id: null, child_order: 1, recurring: false, due: fx.due ? { date: fx.due.date, string: '' } : null };
     siblings.forEach((i, k) => { i.child_order = k + 2; });
     S.data.items.push(item);
     S.tags.assign[tempId] = tagIds;
@@ -2397,6 +2510,7 @@
 
     const args = { content: name, project_id: pid };
     if (sectionId) args.section_id = sectionId;
+    if (fx.due) args.due = fx.due;
     try {
       // En el mismo envío: crear y ponerla la primera (el temp_id vale para el reorder)
       const orden = [{ id: tempId, child_order: 1 }].concat(siblings.filter(i => !String(i.id).startsWith('tmp-')).map(i => ({ id: i.id, child_order: i.child_order })));
@@ -2407,9 +2521,10 @@
       S.tags.assign[realId] = S.tags.assign[tempId] || [];
       delete S.tags.assign[tempId];
       saveTags();
-      if (isYmd(ed.fecha)) setFecha(realId, ed.fecha);
+      setDur(realId, fx.dur);
       saveCache();
       renderBoard();
+      if (fx.due) calSchedule();
     } catch (e) {
       S.data.items = S.data.items.filter(i => i.id !== tempId);
       delete S.tags.assign[tempId];
@@ -3328,7 +3443,7 @@
       accion = ['Ver días señalados', () => openFestivos(+String(e.start || '').slice(0, 4) || undefined)];
     } else if (tipo === 'tarea') {
       const t = S.data && S.data.items.find(i => i.id === id);
-      desc = 'Tarea de Personal con fecha en el calendario.';
+      desc = 'Tarea de Personal con fecha en Todoist.';
       if (t) accion = ['Abrir tarea', () => { if (S.ui.view !== 'personal') showView('personal'); openEdit(id); }];
     }
     const dia = (e.start || '').slice(0, 10);
@@ -5549,11 +5664,13 @@
       // (los errores se avisan siempre)
       const v = S.ui.view;
       const trabajos = [];
+      // Todoist primero: el calendario se pone al día con sus fechas ya leídas
+      const todoistP = doSync({ silent: v !== 'personal' && v !== 'compra', manual: true });
       // Si la sesión de OneDrive caducó, este clic lleva al login de Microsoft
       if (odConnected() && S.odState === 'login') odConnect();
       else trabajos.push(syncDatos({ notify: v === 'gastos' || v === 'consumos', manual: true }));
       // Contactos de Google: solo si el permiso sigue vigente (no se sale de la página sin pedirlo)
-      if (ggConnected() && ggTokenOk()) trabajos.push(syncContactos({ notify: v === 'contactos', manual: true }).then(async r => [r, await calSync({ notify: v === 'calendario', manual: true })]));
+      if (ggConnected() && ggTokenOk()) trabajos.push(syncContactos({ notify: v === 'contactos', manual: true }).then(async r => { await todoistP.catch(() => null); return [r, await calSync({ notify: v === 'calendario', manual: true })]; }));
       // Sin permiso vigente no se sale de la página, pero se avisa de que Google se queda sin actualizar
       else if (ggConnected()) {
         pedirReconexion('Google', 'El permiso de Google ha caducado (dura una hora): ' + (calReady() ? 'el calendario y los contactos' : 'los contactos') + ' no se han actualizado.', ggLogin);
@@ -5561,7 +5678,7 @@
       }
       // Planner: si la sesión del trabajo caducó, este clic lleva a reconectar
       if (plConnected()) { if (S.plState === 'login') plConnect(); else trabajos.push(plSync({ notify: v === 'trabajo', manual: true })); }
-      trabajos.push(doSync({ silent: v !== 'personal' && v !== 'compra', manual: true }));
+      trabajos.push(todoistP);
       // Una sola entrada de auditoría con el resultado de cada fuente (se registra siempre, aunque no haya cambios)
       Promise.all(trabajos.map(p => p.catch(() => null))).then(rs => {
         const res = rs.flat().filter(Boolean);

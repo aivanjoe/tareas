@@ -687,3 +687,10 @@ a.btn { text-decoration: none; }
 .recon-txt { display: flex; flex-direction: column; gap: 3px; font-size: 13.5px; color: var(--text2); }
 .recon-txt strong { font-size: 15px; color: var(--text); }
 @media (max-width: 560px) { .recon-row { flex-direction: column; align-items: stretch; } }
+
+/* Fecha de la tarea (inicio, hora y «Hasta») */
+.fecha-fila { display: flex; align-items: center; gap: 6px; margin-top: 6px; }
+.fecha-fila:first-of-type { margin-top: 0; }
+.fecha-fila .input { flex: 1 1 0; min-width: 0; }
+.fecha-fila .input[type="time"] { flex: 0 0 124px; }
+.fecha-hasta { flex: 0 0 auto; font-size: 12.5px; font-weight: 700; color: var(--muted); min-width: 40px; }
