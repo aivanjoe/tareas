@@ -4593,16 +4593,28 @@
       h('section', { class: 'panel' }, h('div', { class: 'g-filtros' }, perSeg, catSelect(cats), perLeyenda()), list));
   }
 
+  // Forma de pago de un gasto ('automatico' = domiciliado, como guardaban las versiones anteriores; sin dato, domiciliado)
+  const COBROS = { automatico: 'Domiciliado', debito: 'Débito', credito: 'Crédito', paypal: 'PayPal', manual: 'Manual', otros: 'Otros' };
+  const cobroDe = g => COBROS[g.cobro] ? g.cobro : 'automatico';
+  // Cuándo se cobra: «día 16» si es mensual; si no, día y meses («16 ene, abr, jul y oct»)
+  function cuandoTxt(g) {
+    const d = g.dia || 1;
+    if (esMensual(g)) return 'día ' + d;
+    const ms = (Array.isArray(g.meses) && g.meses.length ? g.meses : mesesPara(g.periodicidad, 1)).slice().sort((a, b) => a - b).map(m => MESES_CORTOS[m - 1].toLowerCase());
+    return d + ' ' + (ms.length > 1 ? ms.slice(0, -1).join(', ') + ' y ' + ms[ms.length - 1] : ms[0]);
+  }
   function gastoRow(g, due, until, paused) {
-    const sub = [g.categoria || 'Otros', PERIODO_NOMBRE[g.periodicidad] || 'Mensual', 'día ' + (g.dia || 1)];
+    const sub = [g.categoria || 'Otros', PERIODO_NOMBRE[g.periodicidad] || 'Mensual', cuandoTxt(g)];
     if (g.proveedor) sub.push(g.proveedor);
-    if (g.cobro === 'automatico') sub.push('domiciliado');
+    const cobro = cobroDe(g);
+    const cobroTxt = cobro === 'paypal' ? 'PayPal' : COBROS[cobro].toLowerCase();
     const chipCls = until === null ? '' : until < 0 ? ' late' : until === 0 ? ' now' : until <= 7 ? ' soon' : '';
     return h('div', { class: 'ev gasto' + (paused ? ' paused' : '') + (until !== null && until < 0 ? ' late' : '') },
       h('span', { class: 'cat-dot', style: '--c:' + perColor(g), title: PERIODO_NOMBRE[g.periodicidad] || 'Mensual' }),
       h('button', { type: 'button', class: 'ev-main as-btn', onclick: () => openGasto(g.id), title: 'Editar' },
         h('span', { class: 'ev-name' }, g.concepto, g.calendario ? h('span', { class: 'g-cal', title: 'En el calendario', 'aria-label': 'En el calendario' }, ICON.calendar()) : null),
-        h('span', { class: 'ev-what' }, sub.join(' · '))),
+        // «manual» en rojo: ese hay que pagarlo a mano
+        h('span', { class: 'ev-what' }, sub.join(' · ') + ' · ', cobro === 'manual' ? h('span', { class: 'g-manual' }, 'manual') : cobroTxt)),
       h('div', { class: 'ev-when' },
         h('span', { class: 'ev-amount' }, fmtEur(g.importe)),
         paused ? h('span', { class: 'ev-until' }, 'pausado')
@@ -4757,7 +4769,7 @@
     const st = {
       periodicidad: cur && (PERIODOS[cur.periodicidad] || cur.periodicidad === 'personalizado') ? cur.periodicidad : 'mensual',
       meses: cur && Array.isArray(cur.meses) && cur.meses.length ? cur.meses.slice() : mesesPara('mensual', 1),
-      cobro: cur ? (cur.cobro === 'manual' ? 'manual' : 'automatico') : 'automatico'
+      cobro: cur ? cobroDe(cur) : 'automatico'
     };
     const inp = (idAttr, attrs) => h('input', Object.assign({ class: 'input', id: idAttr, autocomplete: 'off' }, attrs));
     const concepto = inp('gConcepto', { type: 'text', maxlength: '80', value: cur ? cur.concepto : '', placeholder: 'Por ejemplo: Seguro del coche' });
@@ -4786,10 +4798,8 @@
       drawMeses();
     });
     drawMeses();
-    const cobroSeg = h('div', { class: 'seg' });
-    const drawCobro = () => cobroSeg.replaceChildren(...[['automatico', 'Domiciliado'], ['manual', 'Pago manual']].map(([k, v]) =>
-      h('button', { type: 'button', class: st.cobro === k ? 'on' : '', 'aria-pressed': st.cobro === k ? 'true' : 'false', onclick: () => { st.cobro = k; drawCobro(); } }, v)));
-    drawCobro();
+    const cobroSeg = h('select', { class: 'select', id: 'gCobro', 'aria-label': 'Forma de pago' }, Object.entries(COBROS).map(([k, v]) => h('option', { value: k, selected: st.cobro === k }, v)));
+    cobroSeg.addEventListener('change', () => { st.cobro = cobroSeg.value; });
 
     let close = null;
     const save = () => {
@@ -4819,7 +4829,7 @@
       h('div', { class: 'field' }, h('span', { class: 'field-label' }, 'Meses de cobro'), mesesBox,
         h('p', { class: 'hint' }, 'Se marcan según la periodicidad; pulsa un mes para cambiarlo.')),
       field('Próximo pago fijo', 'gProximo', proximo, 'Opcional. Úsalo si te han cambiado la fecha de cobro; deja de aplicarse al registrar el pago.'),
-      h('div', { class: 'form-row' }, field('Proveedor', 'gProveedor', proveedor), h('div', { class: 'field' }, h('span', { class: 'field-label' }, 'Cobro'), cobroSeg)),
+      h('div', { class: 'form-row' }, field('Proveedor', 'gProveedor', proveedor), h('div', { class: 'field' }, h('label', { class: 'field-label', for: 'gCobro' }, 'Forma de pago'), cobroSeg)),
       field('Notas', 'gNotas', notas),
       h('label', { class: 'check-line', for: 'gCal' }, enCal, 'Mostrar en el calendario (un evento en cada vencimiento)'),
       h('label', { class: 'check-line', for: 'gPausado' }, pausado, 'Pausado (no cuenta en vencimientos ni totales)'),

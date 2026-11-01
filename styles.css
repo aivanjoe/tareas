@@ -706,3 +706,4 @@ a.btn { text-decoration: none; }
 .select.g-cat { width: auto; min-width: 190px; }
 @media (max-width: 700px) { .g-filtros .legend { margin-left: 0; } .select.g-cat { flex: 1 1 160px; min-width: 0; } }
 .per-legend .lg::before { background: var(--c); }
+.g-manual { color: var(--danger, #F0857A); font-weight: 800; }
