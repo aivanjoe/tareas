@@ -1416,7 +1416,9 @@
     let data = null;
     try { data = await r.json(); } catch (e) { /* sin cuerpo */ }
     if (r.ok) return data || {};
-    const msg = (data && data.error && (data.error.message || data.error.status)) || '';
+    const e0 = data && data.error;
+    const det = e0 && Array.isArray(e0.errors) && e0.errors[0] && e0.errors[0].message;
+    const msg = (e0 && (det && det !== e0.message ? e0.message + ' — ' + det : e0.message || e0.status)) || '';
     const esCal = url.includes('/calendar/');
     if (r.status === 403 && esCal && /insufficient|scope|PERMISSION/i.test(msg)) { S.gg.cal = false; saveGg(); throw new GgError('scope', 'Google no deja usar el calendario con el permiso actual.'); }
     if (r.status === 403 && esCal) throw new GgError('http', 'Google Calendar no responde (403). Revisa que la Google Calendar API esté activada en tu proyecto.' + (msg ? ' ' + msg : ''));
@@ -3633,6 +3635,10 @@
       body.recurrence = !repetir.value ? [] : repetir.value === rec0 && rrule ? recLines.slice() : [repetir.value].concat(recOtras);
       saveBtn.disabled = true;
       saveBtn.textContent = 'Guardando…';
+      // Al editar, los null (para borrar date o dateTime) solo hacen falta si cambia de «todo el día» a con hora o al revés
+      if (src && todo.checked === allDay0) for (const k of ['start', 'end']) for (const x of Object.keys(body[k])) if (body[k][x] === null) delete body[k][x];
+      // Sin repetición antes ni ahora: no se toca
+      if (src && !recLines.length && !body.recurrence.length) delete body.recurrence;
       try {
         if (src) await ggCall('PATCH', CALAPI + 'calendars/' + cid + '/events/' + encodeURIComponent(src.id), body);
         else {
