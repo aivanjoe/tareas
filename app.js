@@ -321,7 +321,7 @@
       case 'cumpledias': return kind === 'baja' ? 'Dejar de seguir en Cumples: ' + contacto(id) : kind === 'alta' ? 'Seguir en Cumples: ' + contacto(id) : null;
       case 'personas': return 'Persona ' + q(r.name) + ' ' + verba;
       case 'coloresContactos': return 'Color de la categoría ' + q((grupoMap()[id]) || id) + ' cambiado';
-      case 'fechasTareas': return kind === 'baja' ? 'Fecha de la tarea ' + tarea(id) + ' pasada a Todoist' : 'Fecha en el calendario de la tarea ' + tarea(id) + (kind === 'alta' ? ' puesta' : ' cambiada');
+      case 'fechasTareas': return kind === 'baja' ? 'Fecha de la tarea ' + tarea(id) + ' pasada al calendario' : 'Fecha en el calendario de la tarea ' + tarea(id) + (kind === 'alta' ? ' puesta' : ' cambiada');
       case 'duracionTareas': return kind === 'baja' ? 'Duración de la tarea ' + tarea(id) + ' quitada' : 'Duración de la tarea ' + tarea(id) + ': ' + (r.dias ? r.dias + ' días' : r.min + ' min');
       case 'ajustes': return id === 'calendario' ? 'Calendario elegido: ' + q(r.nombre) : 'Ajuste ' + q(id) + ' ' + verbo;
       default: return n + ' ' + q(id) + ' ' + verbo;
@@ -616,9 +616,6 @@
       const prev = S.data;
       S.data = await fetchAll();
       saveCache();
-      await migrarFechasTareas();
-      // Fuera de la sincronización manual (que pone al día el calendario después), si cambian las fechas
-      if (!opts.manual && firmaFechas(prev) !== firmaFechas(S.data)) calSchedule();
       const det = !prev ? [] : difLista(prev.items, S.data.items, i => cleanTitle(i.content), i => i.content + '|' + (i.section_id || '') + '|' + i.project_id)
         .map(([k, n]) => (k === 'nuevo' ? 'Tarea nueva: «' : k === 'fuera' ? 'Tarea completada o borrada: «' : 'Tarea cambiada: «') + n + '»');
       res = finSync('todoist', opts, det);
@@ -659,26 +656,6 @@
     return Object.assign(d, { finYmd: localYmd(fin), finHm: pad2(fin.getHours()) + ':' + pad2(fin.getMinutes()) });
   }
   const esCompra = item => { const p = compraProyecto(); return !!p && item.project_id === p.id; };
-  const firmaFechas = data => !data ? '' : data.items.filter(i => i.due).map(i => i.id + '|' + i.due.date + '|' + i.content).sort().join();
-  // Una vez: las fechas que una versión anterior guardaba solo en Visir pasan a ser la fecha de Todoist
-  async function migrarFechasTareas() {
-    const col = S.datos.colecciones.fechasTareas;
-    const ids = new Set(S.data.items.map(i => i.id));
-    const durs = S.datos.colecciones.duracionTareas || {};
-    const sobran = Object.keys(durs).filter(id => !ids.has(id) && !id.startsWith('tmp-'));
-    if (sobran.length) { const r = Object.assign({}, durs); for (const id of sobran) delete r[id]; S.datos.colecciones.duracionTareas = r; saveDatos(); }
-    if (!col || !Object.keys(col).length) return;
-    const cmds = [];
-    for (const f of Object.values(col)) {
-      const it = S.data.items.find(i => i.id === f.id);
-      if (it && !it.due && isYmd(f.fecha)) { cmds.push({ type: 'item_update', uuid: uid(), args: { id: it.id, due: { date: f.fecha } } }); it.due = { date: f.fecha, string: '' }; }
-    }
-    try { if (cmds.length) await runCommands(cmds); }
-    catch (e) { toast('No se pudieron pasar las fechas de las tareas a Todoist: ' + e.message, 'error'); return; }
-    S.datos.colecciones.fechasTareas = {};
-    saveCache(); saveDatos();
-  }
-
   // Si una escritura falla, se vuelve a leer Todoist para dejar el tablero como está de verdad
   async function recover(err) {
     toast(err.message, 'error');
@@ -1719,22 +1696,50 @@
       if (first === undefined) continue;
       ev('gasto:' + g.id, g.concepto, ymdOf(first), { recurrence: [gastoRRule(g)], colorId: '5' });
     }
-    // Tareas de Personal con fecha de Todoist (menos las de la compra), con hora si la tienen y lo que duren
-    if (S.data && S.data.conFechas) for (const t of S.data.items) {
-      if (String(t.id).startsWith('tmp-') || esCompra(t)) continue;
-      const f = fechaTarea(t);
-      if (!f) continue;
-      if (!f.hm) { ev('tarea:' + t.id, cleanTitle(t.content), f.ymd, { colorId: '2', end: { date: f.finYmd } }); continue; }
-      const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
-      ev('tarea:' + t.id, cleanTitle(t.content), f.ymd, { colorId: '2', transparency: 'opaque',
-        start: { dateTime: f.ymd + 'T' + f.hm + ':00', timeZone: tz }, end: { dateTime: f.finYmd + 'T' + f.finHm + ':00', timeZone: tz } });
-    }
     return out;
   }
 
   const calT = x => (x && x.date || '') + '|' + (x && x.dateTime ? Date.parse(x.dateTime) : '');
   const calSame = (e, d) => e.summary === d.summary && calT(e.start) === calT(d.start) && calT(e.end) === calT(d.end) && (e.transparency || 'opaque') === (d.transparency || 'opaque') &&
     (e.recurrence || []).join() === (d.recurrence || []).join() && (e.colorId || '') === (d.colorId || '') && (e.description || '') === (d.description || '');
+
+  // Una vez: cada tarea de Todoist con fecha (no recurrente, fuera de «Compra») pasa a ser un evento normal
+  // del calendario (sin la marca de la app) y se le quita la fecha en Todoist (decisión del usuario: las
+  // fechas viven en Calendario). Si el evento de la tarea ya existía, se convierte en el mismo evento.
+  // Las ya pasadas a Google quedan apuntadas (mp.convertidas) por si falla Todoist, para no duplicarlas.
+  const CONV_KEY = 'mp.convertidas';
+  async function convertirTareasConFecha(mine, cid, cambios) {
+    const hechas = new Set(store.get(CONV_KEY, []) || []);
+    const tz = localTz();
+    const conv = [];
+    for (const t of S.data.items) {
+      if (String(t.id).startsWith('tmp-') || t.recurring || esCompra(t)) continue;
+      const f = fechaTarea(t);
+      if (!f) continue;
+      conv.push(t);
+      if (hechas.has(t.id)) continue;
+      const body = { summary: cleanTitle(t.content), description: '', reminders: { useDefault: true } };
+      if (f.hm) { body.start = { dateTime: f.ymd + 'T' + f.hm + ':00', timeZone: tz }; body.end = { dateTime: f.finYmd + 'T' + f.finHm + ':00', timeZone: tz }; }
+      else { body.start = { date: f.ymd }; body.end = { date: f.finYmd }; }
+      const ya = mine.find(e => ((e.extendedProperties || {}).private || {}).mpKey === 'tarea:' + t.id);
+      if (ya) await ggCall('PUT', CALAPI + 'calendars/' + cid + '/events/' + encodeURIComponent(ya.id), body);
+      else await ggCall('POST', CALAPI + 'calendars/' + cid + '/events', body);
+      hechas.add(t.id);
+      store.set(CONV_KEY, [...hechas]);
+      cambios.push('Tarea con fecha pasada a evento: «' + body.summary + '»');
+    }
+    // Quitar la fecha en Todoist (las de la versión anterior que solo estaban en Visir no la tienen)
+    const cmds = conv.filter(t => t.due).map(t => ({ type: 'item_update', uuid: uid(), args: { id: t.id, due: null } }));
+    if (cmds.length) {
+      try { await runCommands(cmds); for (const t of conv) t.due = null; saveCache(); }
+      catch (e) { toast('Las tareas con fecha ya están en el calendario, pero no se pudo quitar su fecha en Todoist: ' + e.message, 'error'); return new Set([...hechas].map(id => 'tarea:' + id)); }
+    }
+    store.set(CONV_KEY, []);
+    const cols = S.datos.colecciones;
+    if (Object.keys(cols.fechasTareas || {}).length || Object.keys(cols.duracionTareas || {}).length) { cols.fechasTareas = {}; cols.duracionTareas = {}; saveDatos(); }
+    if (conv.length) { toast(plural(conv.length, 'tarea con fecha pasada', 'tareas con fecha pasadas') + ' a eventos del calendario. Las tienes en Calendario → Lista.'); renderAll(); }
+    return new Set([...hechas].map(id => 'tarea:' + id));
+  }
 
   // Deja los eventos de la app como mandan los datos: crea, cambia o borra solo los suyos
   async function calReconcile() {
@@ -1746,9 +1751,14 @@
       mine.push(...(r.items || []));
       page = r.nextPageToken || '';
     } while (page);
+    const cambios = [];
+    // Las tareas con fecha (versión anterior) pasan a ser eventos tuyos; las que quedaron hechas salen de la lista
+    if (S.data && S.data.conFechas) {
+      const hechas = await convertirTareasConFecha(mine, cid, cambios);
+      for (let i = mine.length - 1; i >= 0; i--) if (hechas.has(((mine[i].extendedProperties || {}).private || {}).mpKey)) mine.splice(i, 1);
+    }
     const want = calDesired();
     const seen = new Set();
-    const cambios = [];
     for (const e of mine) {
       const key = ((e.extendedProperties || {}).private || {}).mpKey;
       // Sin datos de Todoist cargados no se tocan los eventos de tareas
@@ -1800,6 +1810,7 @@
       const to = ymdOf(Date.UTC(t.getUTCFullYear(), t.getUTCMonth() + 13, 1));
       S.cal.events = [];
       await calFetch(from, to);
+      await calFetchLista();
       S.cal.syncedAt = Date.now();
       saveCal();
       S.calState = 'idle';
@@ -2009,23 +2020,16 @@
     }
   }
 
-  // «5 nov», «5 nov, 21:00», «5 – 9 nov»
-  function fechaTxt(f) {
-    const ult = f.hm ? f.finYmd : addDays(f.finYmd, -1);
-    return fmtDay(utcDay(f.ymd)) + (f.hm ? ', ' + f.hm : '') + (ult !== f.ymd ? ' – ' + fmtDay(utcDay(ult)) + (f.hm ? ', ' + f.finHm : '') : '');
-  }
-
   function renderCard(item) {
     const tags = assigned(item.id).map(tagById);
     const pending = item.id.startsWith('tmp-');
     const work = isWork();
     const hasNotes = work ? item.hasDescription : (S.data.notes || []).some(n => n.item_id === item.id);
-    const fechaCal = !work && fechaTarea(item);
-    const hasFecha = !!fechaCal;
+
     const title = work ? item.title : cleanTitle(item.content);
     const notesLabel = work ? 'Tiene notas' : 'Tiene comentarios';
     return h('div', {
-      class: 'card' + (pending ? ' pending' : '') + (hasNotes || hasFecha ? ' has-notes' : ''),
+      class: 'card' + (pending ? ' pending' : '') + (hasNotes ? ' has-notes' : ''),
       dataset: { taskId: item.id },
       style: '--strip:' + (tags[0] ? tags[0].color : 'transparent')
     },
@@ -2037,9 +2041,7 @@
         type: 'button', class: 'card-title', title,
         onclick: () => { if (!pending) openEdit(item.id); }
       }, title),
-      hasNotes || fechaCal ? h('span', { class: 'card-notes' },
-        fechaCal ? h('span', { class: 'card-cal', title: 'En el calendario: ' + fechaTxt(fechaCal), 'aria-label': 'En el calendario el ' + fechaTxt(fechaCal) }, ICON.calendar()) : null,
-        hasNotes ? h('span', { title: notesLabel, 'aria-label': notesLabel }, ICON.comment()) : null) : null,
+      hasNotes ? h('span', { class: 'card-notes' }, h('span', { title: notesLabel, 'aria-label': notesLabel }, ICON.comment())) : null,
       tags.length ? h('span', { class: 'card-tags' },
         tags.map(t => h('span', { class: 'mini-tag', style: '--c:' + t.color }, t.name))) : null
     );
@@ -2087,8 +2089,6 @@
     if (idx < 0) return;
     const [item] = S.data.items.splice(idx, 1);
     saveCache();
-    // Si tenía fecha, su evento se borra (vuelve al deshacer; en las recurrentes pasa a la siguiente fecha)
-    const conFecha = !!dueDe(item);
     renderBoard();
     renderProjects();
     const undo = item.recurring ? null : { label: 'Deshacer', fn: () => undoComplete(item) };
@@ -2096,7 +2096,6 @@
     try {
       await runCommands([{ type: 'item_close', uuid: uid(), args: { id } }]);
       if (item.recurring) await doSync({ silent: true });
-      else if (conFecha) calSchedule();
     } catch (e) { await recover(e); }
   }
 
@@ -2105,7 +2104,7 @@
     saveCache();
     renderBoard();
     renderProjects();
-    try { await runCommands([{ type: 'item_uncomplete', uuid: uid(), args: { id: item.id } }]); if (dueDe(item)) calSchedule(); }
+    try { await runCommands([{ type: 'item_uncomplete', uuid: uid(), args: { id: item.id } }]); }
     catch (e) { await recover(e); }
   }
 
@@ -2184,7 +2183,7 @@
   // ---------- panel de tarea (nueva / editar) ----------
   function openNew(sectionKey, fromHeader) {
     if (!boardReady()) return;
-    S.editing = { mode: 'new', sectionKey, fromHeader, name: '', tagIds: [], work: isWork(), fecha: '', hora: '', hastaF: '', hastaH: '' };
+    S.editing = { mode: 'new', sectionKey, fromHeader, name: '', tagIds: [], work: isWork() };
     renderDrawer();
   }
 
@@ -2192,12 +2191,7 @@
     const item = isWork() ? plTask(taskId) : S.data.items.find(i => i.id === taskId);
     if (!item) return;
     const name = isWork() ? item.title : item.content;
-    const f = !isWork() && fechaTarea(item);
-    const ult = f && (f.hm ? f.finYmd : addDays(f.finYmd, -1));
-    const conDur = !!(S.datos.colecciones.duracionTareas || {})[taskId];
-    S.editing = { mode: 'edit', taskId, name, original: name, tagIds: assigned(taskId).slice(), work: isWork(), recurring: !isWork() && item.recurring, dueTxt: (item.due && item.due.string) || '',
-      fecha: f ? f.ymd : '', hora: f ? f.hm : '', hastaF: f && conDur ? ult : '', hastaH: f && f.hm && conDur ? f.finHm : '' };
-    S.editing.orig = { fecha: S.editing.fecha, hora: S.editing.hora, hastaF: S.editing.hastaF, hastaH: S.editing.hastaH };
+    S.editing = { mode: 'edit', taskId, name, original: name, tagIds: assigned(taskId).slice(), work: isWork() };
     renderDrawer();
   }
 
@@ -2247,37 +2241,6 @@
     drawChips();
 
     const commentsField = ed.mode === 'edit' && !ed.taskId.startsWith('tmp-') ? (isWork() ? plNotesSection(ed) : commentsSection(ed.taskId)) : null;
-    // Fecha (Personal): es la fecha de Todoist; con ella la tarea sale en el calendario. «Hasta» (lo que dura) va en Visir
-    let fechaField = null;
-    if (!isWork()) {
-      const rec = ed.recurring;
-      const inp = (id, type, k, label) => {
-        const x = h('input', { class: 'input', id, type, value: ed[k] || '', 'aria-label': label, disabled: rec && (k === 'fecha' || k === 'hora') });
-        // 'input' además de 'change': en iPad/iPhone 'change' no llega hasta salir del campo
-        const upd = () => { ed[k] = x.value; if (k === 'hora' || k === 'fecha') pintaHasta(); };
-        x.addEventListener('input', upd); x.addEventListener('change', upd);
-        return x;
-      };
-      const fF = inp('taskFecha', 'date', 'fecha', 'Fecha'), fH = inp('taskHora', 'time', 'hora', 'Hora (opcional)');
-      const hF = inp('taskHastaF', 'date', 'hastaF', 'Hasta el día'), hH = inp('taskHastaH', 'time', 'hastaH', 'Hasta la hora');
-      const hasta = h('div', { class: 'fecha-fila' });
-      // «Hasta» siempre a la vista; la hora de fin, solo si hay hora de inicio
-      const pintaHasta = () => { hH.hidden = !ed.hora; };
-      hasta.append(h('span', { class: 'fecha-hasta' }, 'Hasta'), hF, hH);
-      pintaHasta();
-      fechaField = h('div', { class: 'field' },
-        h('label', { class: 'field-label', for: 'taskFecha' }, 'Fecha'),
-        h('div', { class: 'fecha-fila' }, fF, fH, rec ? null : h('button', { type: 'button', class: 'btn subtle small', onclick: () => {
-          for (const k of ['fecha', 'hora', 'hastaF', 'hastaH']) ed[k] = '';
-          for (const x of [fF, fH, hF, hH]) x.value = '';
-          pintaHasta();
-        } }, 'Quitar')),
-        hasta,
-        h('p', { class: 'hint' }, rec ? 'Tarea que se repite' + (ed.dueTxt ? ' («' + ed.dueTxt + '»)' : '') + ': la fecha se cambia en Todoist. Sale en el calendario en su próxima fecha.'
-          : (calReady() ? 'Es la fecha de la tarea en Todoist y sale en tu calendario. La hora es opcional; «Hasta», para lo que dura varios días (un viaje) o la hora de fin. Al completar la tarea, el evento se borra.'
-            : 'Es la fecha de la tarea en Todoist. Saldrá en el calendario cuando conectes Google Calendar en Ajustes.')));
-    }
-
     let columnField = null;
     if (ed.mode === 'new' && ed.fromHeader) {
       const sel = h('select', { class: 'select', id: 'taskColumn' },
@@ -2301,7 +2264,6 @@
         tagList().length
           ? h('p', { class: 'hint' }, 'Pulsa una etiqueta para asignarla o quitarla.')
           : h('div', null, h('button', { type: 'button', class: 'btn ghost small', onclick: isWork() ? openPlLabels : openTagManager }, 'Crear etiquetas'))),
-      fechaField,
       commentsField,
       h('div', { class: 'drawer-foot' },
         ed.mode === 'edit'
@@ -2431,26 +2393,6 @@
     catch (e) { await recover(e); }
   }
 
-  // Fecha del panel de la tarea → { due: { date } | null, dur: { dias } | { min } | null }, o el texto del error
-  function leerFecha(ed) {
-    if (!isYmd(ed.fecha)) {
-      if (ed.recurring) return { due: null, dur: null };
-      return ed.hora || ed.hastaF || ed.hastaH ? 'Pon la fecha de inicio.' : { due: null, dur: null };
-    }
-    if (!ed.hora) {
-      const dias = isYmd(ed.hastaF) ? Math.round((utcDay(ed.hastaF) - utcDay(ed.fecha)) / DAY) + 1 : 1;
-      if (dias < 1) return 'La fecha «Hasta» es anterior a la de inicio.';
-      return { due: { date: ed.fecha }, dur: dias > 1 ? { dias } : null };
-    }
-    const ini = new Date(ed.fecha + 'T' + ed.hora + ':00');
-    let fin = ed.hastaF || ed.hastaH ? new Date((isYmd(ed.hastaF) ? ed.hastaF : ed.fecha) + 'T' + (ed.hastaH || ed.hora) + ':00') : null;
-    // Solo la hora de fin y antes que la de inicio: acaba al día siguiente
-    if (fin && !ed.hastaF && fin <= ini) fin = new Date(fin.getTime() + DAY);
-    const min = fin ? Math.round((fin - ini) / 60000) : 60;
-    if (min <= 0) return 'El final es anterior al inicio.';
-    return { due: { date: ed.fecha + 'T' + ed.hora + ':00' }, dur: min !== 60 ? { min } : null };
-  }
-
   async function saveDrawer() {
     const ed = S.editing;
     if (!ed) return;
@@ -2460,18 +2402,8 @@
       return;
     }
     const tagIds = ed.tagIds.filter(id => tagById(id));
-    const fx = ed.work ? null : leerFecha(ed);
-    if (typeof fx === 'string') { toast(fx, 'error'); return; }
     closeDrawer();
     if (ed.work) return plSaveDrawer(ed, name, tagIds);
-    const setDur = (id, dur) => {
-      const cur = (S.datos.colecciones.duracionTareas || {})[id];
-      if (JSON.stringify(cur ? { dias: cur.dias, min: cur.min } : null) === JSON.stringify(dur ? { dias: dur.dias, min: dur.min } : null)) return;
-      const rest = Object.assign({}, S.datos.colecciones.duracionTareas);
-      if (dur) rest[id] = Object.assign({ id }, dur); else delete rest[id];
-      S.datos.colecciones.duracionTareas = rest;
-      saveDatos();
-    };
 
     if (ed.mode === 'edit') {
       const item = S.data.items.find(i => i.id === ed.taskId);
@@ -2479,17 +2411,10 @@
       S.tags.assign[ed.taskId] = tagIds;
       saveTags();
       const renamed = name !== ed.original.trim();
-      const dueChanged = !ed.recurring && (ed.fecha !== ed.orig.fecha || ed.hora !== ed.orig.hora);
-      if (renamed) item.content = name;
-      if (dueChanged) item.due = fx.due ? { date: fx.due.date, string: '' } : null;
-      if (renamed || dueChanged) saveCache();
-      setDur(ed.taskId, fx.due || ed.recurring ? fx.dur : null);
+      if (renamed) { item.content = name; saveCache(); }
       renderBoard();
-      const cmds = [];
-      if (renamed) cmds.push({ type: 'item_update', uuid: uid(), args: { id: item.id, content: name } });
-      if (dueChanged) cmds.push({ type: 'item_update', uuid: uid(), args: { id: item.id, due: fx.due } });
-      if (cmds.length) {
-        try { await runCommands(cmds); calSchedule(); }
+      if (renamed) {
+        try { await runCommands([{ type: 'item_update', uuid: uid(), args: { id: item.id, content: name } }]); }
         catch (e) { await recover(e); }
       }
       return;
@@ -2501,7 +2426,7 @@
     const sectionId = ed.sectionKey === 'none' ? null : ed.sectionKey;
     // Las tareas nuevas van arriba del todo de su sección (decisión del usuario)
     const siblings = S.data.items.filter(i => i.project_id === pid && (i.section_id || null) === sectionId && !i.parent_id).sort((a, b) => a.child_order - b.child_order);
-    const item = { id: tempId, content: name, project_id: pid, section_id: sectionId, parent_id: null, child_order: 1, recurring: false, due: fx.due ? { date: fx.due.date, string: '' } : null };
+    const item = { id: tempId, content: name, project_id: pid, section_id: sectionId, parent_id: null, child_order: 1, recurring: false, due: null };
     siblings.forEach((i, k) => { i.child_order = k + 2; });
     S.data.items.push(item);
     S.tags.assign[tempId] = tagIds;
@@ -2510,7 +2435,6 @@
 
     const args = { content: name, project_id: pid };
     if (sectionId) args.section_id = sectionId;
-    if (fx.due) args.due = fx.due;
     try {
       // En el mismo envío: crear y ponerla la primera (el temp_id vale para el reorder)
       const orden = [{ id: tempId, child_order: 1 }].concat(siblings.filter(i => !String(i.id).startsWith('tmp-')).map(i => ({ id: i.id, child_order: i.child_order })));
@@ -2521,10 +2445,8 @@
       S.tags.assign[realId] = S.tags.assign[tempId] || [];
       delete S.tags.assign[tempId];
       saveTags();
-      setDur(realId, fx.dur);
       saveCache();
       renderBoard();
-      if (fx.due) calSchedule();
     } catch (e) {
       S.data.items = S.data.items.filter(i => i.id !== tempId);
       delete S.tags.assign[tempId];
@@ -3095,6 +3017,7 @@
 
     const today = ymdOf(todayUtc());
     if (calVista() === 'semana') return renderSemana(root, today);
+    if (calVista() === 'lista') return renderLista(root, today);
     if (calMonth === null) { const t = new Date(todayUtc()); calMonth = Date.UTC(t.getUTCFullYear(), t.getUTCMonth(), 1); }
     const m = new Date(calMonth), Y = m.getUTCFullYear(), M = m.getUTCMonth();
     const first = ymdOf(calMonth), next = ymdOf(Date.UTC(Y, M + 1, 1));
@@ -3152,13 +3075,13 @@
 
   // Vista: mes o semana (recordada por dispositivo en mp.ui.calVista; por defecto semana en el móvil)
   const PHONE = window.matchMedia('(max-width: 700px)');
-  const calVista = () => S.ui.calVista === 'mes' || S.ui.calVista === 'semana' ? S.ui.calVista : PHONE.matches ? 'semana' : 'mes';
+  const calVista = () => ['mes', 'semana', 'lista'].includes(S.ui.calVista) ? S.ui.calVista : PHONE.matches ? 'semana' : 'mes';
   const evsDelDia = ymd => S.cal.events.filter(e => evOnDay(e, ymd)).sort((a, b) => (a.allDay === b.allDay ? a.start.localeCompare(b.start) : a.allDay ? -1 : 1));
   const abrirEvento = e => e.key ? openAppEvent(e) : openCalEvent(e);
   function calVistaSeg() {
     const v = calVista();
     return h('div', { class: 'seg cal-vista', role: 'group', 'aria-label': 'Vista del calendario' },
-      [['mes', 'Mes'], ['semana', 'Semana']].map(([k, l]) => h('button', {
+      [['mes', 'Mes'], ['semana', 'Semana'], ['lista', 'Lista']].map(([k, l]) => h('button', {
         type: 'button', class: v === k ? 'on' : '', 'aria-pressed': v === k ? 'true' : 'false',
         onclick: () => {
           S.ui.calVista = k; saveUi();
@@ -3169,7 +3092,7 @@
   }
   const calLeyenda = () => h('div', { class: 'legend cal-legend' },
     h('span', { class: 'lg', style: '--c:#E68AC4' }, 'Cumpleaños'), h('span', { class: 'lg', style: '--c:#F2B35B' }, 'Cumpledías'), h('span', { class: 'lg', style: '--c:' + SANTO_COLOR }, 'Santos'),
-    h('span', { class: 'lg', style: '--c:#F5D76E' }, 'Gastos'), h('span', { class: 'lg', style: '--c:#DBF266' }, 'Tareas'), h('span', { class: 'lg', style: '--c:' + FESTIVO_COLOR }, 'Festivos'),
+    h('span', { class: 'lg', style: '--c:#F5D76E' }, 'Gastos'), h('span', { class: 'lg', style: '--c:' + FESTIVO_COLOR }, 'Festivos'),
     h('span', { class: 'lg', style: '--c:' + SENALADO_COLOR }, 'Días señalados'));
 
   // Vista de semana (lunes a domingo): cada día con sus eventos con el nombre entero.
@@ -3211,6 +3134,120 @@
           h('span', { class: 'wk-title' }, e.title))) : h('span', { class: 'wk-none' }, 'Sin eventos')));
     }));
     root.replaceChildren(h('section', { class: 'panel' }, nav, semana));
+  }
+
+  // ---- vista Lista: tus eventos (los que no son de la app), los próximos o los pasados ----
+  // Se leen sin desplegar las series (una fila por evento o serie), desde hace un año y sin límite hacia delante,
+  // así salen también fechas lejanas (una caducidad dentro de cinco años). Se guardan para verlas sin conexión.
+  async function calFetchLista() {
+    const cid = encodeURIComponent(calCfg().calendarId);
+    const items = [];
+    let page = '';
+    do {
+      const r = await ggGet(CALAPI + 'calendars/' + cid + '/events?singleEvents=false&maxResults=2500&timeMin=' + encodeURIComponent(addDays(ymdOf(todayUtc()), -366) + 'T00:00:00Z') + (page ? '&pageToken=' + encodeURIComponent(page) : ''));
+      items.push(...(r.items || []));
+      page = r.nextPageToken || '';
+    } while (page);
+    S.cal.lista = items.filter(e => e.status !== 'cancelled' && !e.recurringEventId && e.start && ((e.extendedProperties || {}).private || {}).mpApp !== '1').map(e => ({
+      id: e.id, title: e.summary || '(sin título)', allDay: !!e.start.date,
+      start: e.start.date || e.start.dateTime || '', end: (e.end && (e.end.date || e.end.dateTime)) || '',
+      rrule: (e.recurrence || []).find(l => /^RRULE:/i.test(l)) || ''
+    }));
+    S.cal.listaAt = Date.now();
+    saveCal();
+  }
+  // Primer y último día (locales) de un evento
+  const evDias = e => {
+    const ini = e.allDay ? e.start.slice(0, 10) : localYmd(new Date(e.start));
+    const ult = e.allDay ? addDays((e.end || addDays(ini, 1)).slice(0, 10), -1) : localYmd(new Date(e.end || e.start));
+    return { ini, ult: ult < ini ? ini : ult };
+  };
+  const REP_TXT = { WEEKLY: 'cada semana', MONTHLY: 'cada mes', YEARLY: 'cada año', DAILY: 'cada día' };
+  // Ocurrencia que toca de un evento: la próxima (o la que está en curso) o, si ya no habrá más, la última.
+  // Las series se calculan por su frecuencia (cada N días, semanas, meses o años desde la fecha de inicio).
+  function ocurrencia(e, hoy) {
+    const { ini, ult } = evDias(e);
+    const dur = Math.round((utcDay(ult) - utcDay(ini)) / DAY);
+    if (!e.rrule) return { ini, ult, pasado: ult < hoy };
+    const p = Object.fromEntries(e.rrule.replace(/^RRULE:/i, '').split(';').map(x => x.split('=')).map(([k, v]) => [String(k).toUpperCase(), v]));
+    const n = Math.max(1, +p.INTERVAL || 1), freq = String(p.FREQ || '').toUpperCase();
+    const until = p.UNTIL ? p.UNTIL.slice(0, 4) + '-' + p.UNTIL.slice(4, 6) + '-' + p.UNTIL.slice(6, 8) : null;
+    const count = +p.COUNT || Infinity;
+    const d0 = new Date(utcDay(ini));
+    const kesima = k => freq === 'DAILY' ? addDays(ini, k * n) : freq === 'WEEKLY' ? addDays(ini, k * n * 7)
+      : freq === 'MONTHLY' ? ymdOf(Date.UTC(d0.getUTCFullYear(), d0.getUTCMonth() + k * n, Math.min(d0.getUTCDate(), new Date(Date.UTC(d0.getUTCFullYear(), d0.getUTCMonth() + k * n + 1, 0)).getUTCDate())))
+      : freq === 'YEARLY' ? ymdOf(Date.UTC(d0.getUTCFullYear() + k * n, d0.getUTCMonth(), Math.min(d0.getUTCDate(), new Date(Date.UTC(d0.getUTCFullYear() + k * n, d0.getUTCMonth() + 1, 0)).getUTCDate())))
+      : null;
+    if (!kesima(0)) return { ini, ult, pasado: false, rep: 'se repite' };
+    let last = null;
+    for (let k = 0; k < count && k < 5000; k++) {
+      const a = kesima(k);
+      if (until && a > until) break;
+      last = a;
+      if (addDays(a, dur) >= hoy) return { ini: a, ult: addDays(a, dur), pasado: false, rep: REP_TXT[freq] };
+    }
+    return last ? { ini: last, ult: addDays(last, dur), pasado: true, rep: REP_TXT[freq] } : { ini, ult, pasado: true, rep: REP_TXT[freq] };
+  }
+  let calListaModo = 'proximos', calListaQ = '';
+  function renderLista(root, today) {
+    if (!S.cal.listaAt && ggTokenOk() && !calLoading) {
+      calLoading = true;
+      calFetchLista().catch(e => toast(e.message || 'No se pudo leer el calendario.', 'error'))
+        .finally(() => { calLoading = false; if (S.ui.view === 'calendario') renderCal(); });
+    }
+    const conVisir = !!S.ui.calListaVisir, pasados = calListaModo === 'pasados';
+    let filas = (S.cal.lista || []).map(e => Object.assign({ e }, ocurrencia(e, today)));
+    // Los de Visir (cumpleaños, santos, gastos…): la próxima vez de cada uno, de lo ya leído
+    if (conVisir && !pasados) {
+      const vistos = new Set();
+      for (const e of S.cal.events.filter(x => x.key).sort((a, b) => a.start.localeCompare(b.start))) {
+        const d = evDias(e);
+        if (d.ult < today || vistos.has(e.key)) continue;
+        vistos.add(e.key);
+        filas.push({ e, ini: d.ini, ult: d.ult, pasado: false, app: true });
+      }
+    }
+    const q = normName(calListaQ);
+    filas = filas.filter(f => f.pasado === pasados && (!q || normName(f.e.title).includes(q)))
+      .sort((a, b) => pasados ? b.ini.localeCompare(a.ini) : a.ini.localeCompare(b.ini) || (a.e.allDay === b.e.allDay ? a.e.start.localeCompare(b.e.start) : a.e.allDay ? -1 : 1));
+    const f = (ymd, o) => new Date(utcDay(ymd)).toLocaleDateString('es-ES', Object.assign({ timeZone: 'UTC' }, o)).replace(/\./g, '');
+    const cuenta = x => {
+      if (x.ini <= today && today <= x.ult) return x.ini === x.ult ? 'hoy' : 'en curso';
+      const d = Math.round((utcDay(x.ini) - utcDay(today)) / DAY);
+      const txt = n => n === 1 ? 'mañana' : n < 60 ? n + ' días' : n < 730 ? Math.round(n / 30.4) + ' meses' : Math.round(n / 365.25) + ' años';
+      return d > 0 ? (d === 1 ? 'mañana' : 'en ' + txt(d)) : d === -1 ? 'ayer' : 'hace ' + txt(-d);
+    };
+    const lista = h('div', { class: 'agenda' });
+    let mes = '';
+    for (const x of filas) {
+      const m = x.ini.slice(0, 7);
+      if (m !== mes) { mes = m; lista.append(h('h3', { class: 'agenda-mes' }, cap(f(x.ini, { month: 'long', year: 'numeric' })))); }
+      const e = x.e;
+      const hora = e.allDay ? '' : new Date(e.start).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' }) + (e.end ? '–' + new Date(e.end).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' }) : '');
+      const rango = x.ult !== x.ini ? 'hasta el ' + f(x.ult, { weekday: 'short', day: 'numeric', month: 'short' }) : '';
+      const abrir = () => x.app ? openAppEvent(e) : openCalEvent({ id: e.id, serie: e.rrule ? e.id : '', start: e.start });
+      lista.append(h('button', { type: 'button', class: 'agenda-row' + (x.pasado ? ' pasado' : ''), style: '--c:' + evColor(e), onclick: abrir },
+        h('span', { class: 'agenda-dia' }, h('span', { class: 'agenda-num' }, String(+x.ini.slice(8))), h('span', { class: 'agenda-wd' }, f(x.ini, { weekday: 'short' }))),
+        h('span', { class: 'ev-main' }, h('span', { class: 'ev-name' }, e.title),
+          h('span', { class: 'ev-what' }, [rango, hora || (x.ult === x.ini ? 'todo el día' : ''), x.rep, x.app ? evOrigin(e).toLowerCase() : ''].filter(Boolean).join(' · '))),
+        h('span', { class: 'agenda-cuenta' }, cuenta(x))));
+    }
+    if (!filas.length) lista.append(h('p', { class: 'muted empty-note' }, q ? 'Nada coincide con la búsqueda.' : pasados ? 'Sin eventos en el último año.' : S.cal.listaAt ? 'No tienes eventos próximos. Créalos con «Nuevo evento».' : ggTokenOk() ? 'Leyendo…' : 'Sincroniza para ver aquí tus eventos.'));
+    const buscar = h('input', { class: 'input', type: 'search', placeholder: 'Buscar', 'aria-label': 'Buscar eventos', value: calListaQ, autocomplete: 'off' });
+    buscar.addEventListener('input', () => { calListaQ = buscar.value; const pos = buscar.selectionStart; renderCal(); const b = document.querySelector('.agenda-bar input[type=search]'); if (b) { b.focus(); try { b.setSelectionRange(pos, pos); } catch (er) { /* */ } } });
+    const visir = h('input', { type: 'checkbox', id: 'agVisir', checked: conVisir });
+    visir.addEventListener('change', () => { S.ui.calListaVisir = visir.checked; saveUi(); renderCal(); });
+    const nav = h('div', { class: 'cal-nav' },
+      h('h2', null, 'Tus eventos'),
+      calVistaSeg(),
+      h('button', { type: 'button', class: 'btn subtle small', onclick: () => openFestivos() }, 'Festivos'),
+      calLoading ? h('span', { class: 'muted' }, 'Leyendo…') : null);
+    const barra = h('div', { class: 'agenda-bar' },
+      h('div', { class: 'seg', role: 'group', 'aria-label': 'Próximos o pasados' }, [['proximos', 'Próximos'], ['pasados', 'Pasados']].map(([k, l]) =>
+        h('button', { type: 'button', class: calListaModo === k ? 'on' : '', 'aria-pressed': calListaModo === k ? 'true' : 'false', onclick: () => { calListaModo = k; renderCal(); } }, l))),
+      buscar,
+      pasados ? null : h('label', { class: 'check-line', for: 'agVisir' }, visir, 'Incluir los de Visir'));
+    root.replaceChildren(h('section', { class: 'panel' }, nav, barra, lista));
   }
 
   // ---- festivos ----
@@ -3484,8 +3521,8 @@
     const partes = dt => { const d = new Date(dt); return { ymd: localYmd(d), hm: String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0') }; };
     const ini = src ? (src.start.date ? { ymd: src.start.date, hm: '' } : partes(src.start.dateTime)) : { ymd: calSel || ymdOf(todayUtc()), hm: '' };
     const fin = src ? (src.end.date ? { ymd: src.end.date, hm: '' } : partes(src.end.dateTime)) : null;
-    // Días que dura un evento de todo el día (se conservan al cambiar la fecha)
-    const span = src && src.start.date && src.end.date ? Math.max(1, Math.round((utcDay(src.end.date) - utcDay(src.start.date)) / DAY)) : 1;
+    // Último día del evento (los de todo el día acaban, en Google, el día siguiente al último)
+    const ult0 = !fin ? ini.ymd : fin.hm ? fin.ymd : addDays(fin.ymd, -1);
     // Repetición: la línea RRULE manda; las demás (EXDATE, días quitados de la serie) se conservan
     const recLines = (src && src.recurrence) || [];
     const rrule = recLines.find(l => /^RRULE:/i.test(l)) || '';
@@ -3510,14 +3547,37 @@
     titulo.value = src ? src.summary || '' : '';
     const fecha = h('input', { class: 'input', type: 'date', 'aria-label': 'Fecha' });
     fecha.value = ini.ymd;
+    // «Hasta»: para lo que dura varios días (un viaje). Se mueve con la fecha de inicio
+    const hasta = h('input', { class: 'input', type: 'date', 'aria-label': 'Hasta el día' });
+    hasta.value = ult0 > ini.ymd ? ult0 : ini.ymd;
+    let prevFecha = fecha.value;
+    const moverHasta = () => {
+      if (isYmd(prevFecha) && isYmd(fecha.value) && isYmd(hasta.value)) hasta.value = addDays(hasta.value, Math.round((utcDay(fecha.value) - utcDay(prevFecha)) / DAY));
+      else if (isYmd(fecha.value) && !isYmd(hasta.value)) hasta.value = fecha.value;
+      if (isYmd(fecha.value)) prevFecha = fecha.value;
+    };
+    fecha.addEventListener('change', moverHasta);
+    // Aviso: el del calendario o uno propio (los de todo el día, a las 9:00 del día del aviso; Google admite hasta 4 semanas)
+    const AVISOS = [['def', 'El del calendario'], ['no', 'Sin aviso'], ['0', 'A la hora del evento'], ['1', '1 día antes'], ['7', '1 semana antes'], ['28', '4 semanas antes']];
+    const rem = src && src.reminders;
+    const avisoMin = (k, allDay) => k === '0' ? 0 : +k * 1440 - (allDay ? 540 : 0);
+    let aviso0 = 'def';
+    if (rem && !rem.useDefault) {
+      const ov = rem.overrides || [];
+      if (!ov.length) aviso0 = 'no';
+      else if (ov.length === 1) aviso0 = (AVISOS.find(([k]) => /^\d+$/.test(k) && avisoMin(k, allDay0) === ov[0].minutes) || ['custom'])[0];
+      else aviso0 = 'custom';
+    }
+    const aviso = h('select', { class: 'select', 'aria-label': 'Aviso' }, AVISOS.concat(aviso0 === 'custom' ? [['custom', 'Personalizado (como está en Google)']] : []).map(([v, l]) => h('option', { value: v }, l)));
+    aviso.value = aviso0;
     const todo = h('input', { type: 'checkbox', id: 'ceTodo', checked: allDay0 });
     const hIni = h('input', { class: 'input', type: 'time', 'aria-label': 'Hora de inicio' });
     const hFin = h('input', { class: 'input', type: 'time', 'aria-label': 'Hora de fin' });
     hIni.value = ini.hm || '10:00';
     hFin.value = fin && fin.hm ? fin.hm : '11:00';
     const horas = h('div', { class: 'form-row' },
-      h('div', { class: 'field' }, h('span', { class: 'field-label' }, 'Desde'), hIni),
-      h('div', { class: 'field' }, h('span', { class: 'field-label' }, 'Hasta'), hFin));
+      h('div', { class: 'field' }, h('span', { class: 'field-label' }, 'Hora de inicio'), hIni),
+      h('div', { class: 'field' }, h('span', { class: 'field-label' }, 'Hora de fin'), hFin));
     const pintaHoras = () => { horas.hidden = todo.checked; };
     todo.addEventListener('change', pintaHoras);
     pintaHoras();
@@ -3541,7 +3601,7 @@
     const tras = async msg => {
       close();
       toast(msg);
-      try { await calFetch(S.cal.from || ymdOf(todayUtc()), S.cal.to || addDays(ymdOf(todayUtc()), 400)); } catch (e) { /* se verá al sincronizar */ }
+      try { await calFetch(S.cal.from || ymdOf(todayUtc()), S.cal.to || addDays(ymdOf(todayUtc()), 400)); await calFetchLista(); } catch (e) { /* se verá al sincronizar */ }
       if (S.ui.view === 'calendario') renderCal();
     };
     const fallo = e => {
@@ -3553,15 +3613,21 @@
       const t = titulo.value.trim(), f = fecha.value;
       if (!t) { toast('Escribe el título.', 'error'); titulo.focus(); return; }
       if (!isYmd(f)) { toast('Elige la fecha.', 'error'); return; }
+      const u = isYmd(hasta.value) ? hasta.value : f;
+      if (u < f) { toast('«Hasta» es anterior a la fecha de inicio.', 'error'); return; }
       const body = { summary: t, description: notas.value.trim() };
       if (todo.checked) {
         body.start = { date: f, dateTime: null, timeZone: null };
-        body.end = { date: addDays(f, span), dateTime: null, timeZone: null };
+        body.end = { date: addDays(u, 1), dateTime: null, timeZone: null };
       } else {
         if (!/^\d{2}:\d{2}$/.test(hIni.value) || !/^\d{2}:\d{2}$/.test(hFin.value)) { toast('Pon la hora de inicio y de fin.', 'error'); return; }
-        const fFin = hFin.value <= hIni.value ? addDays(f, 1) : f; // si acaba antes de empezar, es al día siguiente
+        // Mismo día y acaba antes de empezar: es al día siguiente
+        const fFin = u === f && hFin.value <= hIni.value ? addDays(f, 1) : u;
         body.start = { dateTime: f + 'T' + hIni.value + ':00', timeZone: tz, date: null };
         body.end = { dateTime: fFin + 'T' + hFin.value + ':00', timeZone: tz, date: null };
+      }
+      if (aviso.value !== 'custom' && (!src || aviso.value !== aviso0 || (aviso.value !== 'def' && aviso.value !== 'no' && todo.checked !== allDay0))) {
+        body.reminders = aviso.value === 'def' ? { useDefault: true } : { useDefault: false, overrides: aviso.value === 'no' ? [] : [{ method: 'popup', minutes: avisoMin(aviso.value, todo.checked) }] };
       }
       // Si la repetición no cambia se deja la de Google tal cual; si cambia, se conservan los días quitados
       body.recurrence = !repetir.value ? [] : repetir.value === rec0 && rrule ? recLines.slice() : [repetir.value].concat(recOtras);
@@ -3572,7 +3638,7 @@
         else {
           for (const k of ['start', 'end']) for (const x of Object.keys(body[k])) if (body[k][x] === null) delete body[k][x];
           if (!body.recurrence.length) delete body.recurrence;
-          await ggCall('POST', CALAPI + 'calendars/' + cid + '/events', Object.assign(body, { reminders: { useDefault: true } }));
+          await ggCall('POST', CALAPI + 'calendars/' + cid + '/events', body);
         }
         audit('calendario', 'cambio', (src ? 'Evento modificado: «' : 'Evento creado: «') + t + '»' + (src && serie ? ' (toda la serie)' : ''));
         await tras(src ? 'Evento guardado en Google Calendar' : 'Evento creado en Google Calendar');
@@ -3597,13 +3663,15 @@
     const fld = (label, ...els) => h('div', { class: 'field' }, h('span', { class: 'field-label' }, label), ...els);
     const body = h('div', { class: 'form' },
       fld('Título', titulo),
-      h('div', { class: 'form-row' }, fld('Fecha', fecha), fld('Repetir', repetir)),
+      h('div', { class: 'form-row' }, fld('Fecha', fecha), fld('Hasta el día', hasta)),
       h('label', { class: 'check-line', for: 'ceTodo' }, todo, 'Todo el día'),
       horas,
+      h('div', { class: 'form-row' }, fld('Repetir', repetir), fld('Aviso', aviso)),
+      h('p', { class: 'hint' }, '«Hasta el día» es para lo que dura varios días, como un viaje; si es un solo día, déjalo igual que la fecha.'),
       fld('Notas', notas),
       serie ? h('p', { class: 'hint' }, 'Se repite: los cambios se aplican a toda la serie.') : null,
       h('div', { class: 'row-actions modal-foot' },
-        ev && serie ? h('button', { type: 'button', class: 'btn danger small', onclick: () => borrar(ev.id, '¿Borrar solo el evento de este día?', 'Borrado el evento de ese día') }, 'Borrar este día') : null,
+        ev && serie && ev.id !== ev.serie ? h('button', { type: 'button', class: 'btn danger small', onclick: () => borrar(ev.id, '¿Borrar solo el evento de este día?', 'Borrado el evento de ese día') }, 'Borrar este día') : null,
         ev ? h('button', { type: 'button', class: 'btn danger small', onclick: () => borrar(src.id, serie ? '¿Borrar toda la serie? Se puede recuperar desde la papelera de Google Calendar (30 días).' : '¿Borrar este evento? Se puede recuperar desde la papelera de Google Calendar (30 días).', 'Evento borrado') }, serie ? 'Borrar la serie' : 'Borrar') : null,
         h('span', { class: 'spacer' }),
         h('button', { type: 'button', class: 'btn subtle small', onclick: () => close() }, 'Cancelar'),
@@ -3635,7 +3703,7 @@
       }
     }, h('span', { class: 'pick-box', style: isHex(c.color) ? 'background:' + c.color + ';border-color:' + c.color : '' }), h('span', { class: 'ev-main' }, h('span', { class: 'ev-name' }, c.nombre), h('span', { class: 'ev-what' }, c.primary ? 'Calendario principal' : '')))));
     close = openModal('Elige el calendario', h('div', { class: 'form' },
-      h('p', { class: 'hint' }, 'La app leerá sus eventos y creará en él los suyos: cumpleaños y cumpledías especiales de los contactos que sigues, los gastos marcados y las tareas con fecha.'), list));
+      h('p', { class: 'hint' }, 'La app leerá sus eventos y creará en él los suyos: cumpleaños y cumpledías especiales de los contactos que sigues, los gastos marcados, los santos, los festivos y los días señalados.'), list));
   }
 
   // ---------- contactos: cumpledías y cumpleaños ----------
