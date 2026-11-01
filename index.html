@@ -6,10 +6,10 @@
   <meta name="theme-color" content="#0B0F15">
   <!-- Política de seguridad: solo código propio y conexiones con Todoist, Microsoft y Google.
        Si se bloquea algo legítimo, la app lo avisa y lo apunta en la Auditoría (ver CLAUDE.md). -->
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self' https://api.todoist.com https://graph.microsoft.com https://login.microsoftonline.com https://*.1drv.com https://*.onedrive.com https://*.microsoftpersonalcontent.com https://*.sharepoint.com https://*.livefilestore.com https://www.googleapis.com https://people.googleapis.com https://oauth2.googleapis.com; frame-src https://login.microsoftonline.com https://login.live.com; worker-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'none'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self' https://api.todoist.com https://graph.microsoft.com https://login.microsoftonline.com https://*.1drv.com https://*.onedrive.com https://*.microsoftpersonalcontent.com https://*.sharepoint.com https://*.livefilestore.com https://www.googleapis.com https://people.googleapis.com https://oauth2.googleapis.com https://*.local:*; frame-src https://*.local:* https://login.microsoftonline.com https://login.live.com; worker-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'none'">
   <title>Visir</title>
-  <link rel="icon" type="image/svg+xml" href="favicon.svg?v=70">
-  <link rel="apple-touch-icon" href="apple-touch-icon.png?v=70">
+  <link rel="icon" type="image/svg+xml" href="favicon.svg?v=71">
+  <link rel="apple-touch-icon" href="apple-touch-icon.png?v=71">
   <!-- Al añadirla a la pantalla de inicio del iPhone/iPad: se abre como app, con este nombre -->
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="mobile-web-app-capable" content="yes">
@@ -18,7 +18,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="styles.css?v=70">
+  <link rel="stylesheet" href="styles.css?v=71">
 </head>
 <body>
   <div class="app" id="app">
@@ -59,6 +59,10 @@
         <a href="#" class="nav-item" data-view="consumos">
           <svg viewBox="0 0 24 24"><path d="M13 3L5 14h6l-1 7 8-11h-6l1-7z"/></svg>
           <span class="nav-label">Consumos</span>
+        </a>
+        <a href="#" class="nav-item" data-view="heima">
+          <svg viewBox="0 0 24 24"><path d="M3 11l9-7 9 7"/><path d="M5 10v10h14V10"/><path d="M10 20v-5h4v5"/></svg>
+          <span class="nav-label">Heima</span>
         </a>
       </nav>
 
@@ -122,6 +126,7 @@
       <section class="view" id="viewGastos" aria-label="Gastos" hidden></section>
       <section class="view" id="viewConsumos" aria-label="Consumos" hidden></section>
       <section class="view" id="viewAuditoria" aria-label="Auditoría" hidden></section>
+      <section class="view" id="viewHeima" aria-label="Heima" hidden></section>
     </main>
   </div>
 
@@ -132,6 +137,6 @@
   <div class="toasts" id="toasts" aria-live="polite"></div>
 
   <script src="Sortable.min.js"></script>
-  <script src="app.js?v=70"></script>
+  <script src="app.js?v=71"></script>
 </body>
 </html>

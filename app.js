@@ -323,7 +323,7 @@
       case 'coloresContactos': return 'Color de la categoría ' + q((grupoMap()[id]) || id) + ' cambiado';
       case 'fechasTareas': return kind === 'baja' ? 'Fecha de la tarea ' + tarea(id) + ' pasada al calendario' : 'Fecha en el calendario de la tarea ' + tarea(id) + (kind === 'alta' ? ' puesta' : ' cambiada');
       case 'duracionTareas': return kind === 'baja' ? 'Duración de la tarea ' + tarea(id) + ' quitada' : 'Duración de la tarea ' + tarea(id) + ': ' + (r.dias ? r.dias + ' días' : r.min + ' min');
-      case 'ajustes': return id === 'calendario' ? 'Calendario elegido: ' + q(r.nombre) : 'Ajuste ' + q(id) + ' ' + verbo;
+      case 'ajustes': return id === 'calendario' ? 'Calendario elegido: ' + q(r.nombre) : id === 'heima' ? 'Dirección de Heima ' + (r.url ? 'cambiada' : 'quitada') : 'Ajuste ' + q(id) + ' ' + verbo;
       default: return n + ' ' + q(id) + ' ' + verbo;
     }
   }
@@ -449,6 +449,7 @@
     close: () => svg([{ d: 'M6 6l12 12M18 6L6 18' }]),
     trash: () => svg([{ d: 'M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3' }]),
     edit: () => svg([{ d: 'M4 20h4L19 9l-4-4L4 16v4zM13.5 6.5l4 4' }]),
+    ext: () => svg([{ d: 'M14 4h6v6M20 4l-9 9' }, { d: 'M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5' }]),
     file: () => svg([{ d: 'M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z' }, { d: 'M14 3v5h5M9 13h6M9 17h4' }]),
     check: () => svg([{ d: 'M5 12l5 5 9-10' }]),
     calendar: () => svg([{ tag: 'rect', x: '3', y: '5', width: '18', height: '16', rx: '2' }, { d: 'M16 3v4M8 3v4M3 10h18' }]),
@@ -2889,6 +2890,60 @@
       h('div', { class: 'row-edit two' }, inp, h('button', { type: 'button', class: 'btn ghost small', onclick: guardar }, 'Guardar')));
   }
 
+  // ---- Heima: la parte privada, servida por el NAS de casa y embebida aquí ----
+  // La dirección se guarda en el almacén (ajustes → heima), así vale en todos los dispositivos; nunca va en el código.
+  // Antes de embeberla se llama a su /api/ping.php: si no responde, no estás en casa (o el NAS no está).
+  const HEIMA_EJEMPLO = 'https://laki.local:8443/';
+  const heimaUrl = () => { const u = ((S.datos.colecciones.ajustes || {}).heima || {}).url || ''; return /^https:\/\/[^\s]+$/.test(u) ? u.replace(/\/?$/, '/') : ''; };
+  let heimaEstado = null; // { url, ok, ts }
+  async function heimaPing(url) {
+    const ctl = new AbortController();
+    const t = setTimeout(() => ctl.abort(), 5000);
+    try {
+      const r = await fetch(url + 'api/ping.php', { cache: 'no-store', signal: ctl.signal });
+      const j = await r.json();
+      return !!(r.ok && j && j.app === 'heima');
+    } catch (e) { return false; } finally { clearTimeout(t); }
+  }
+  function renderHeima(forzar) {
+    const root = document.getElementById('viewHeima');
+    const url = heimaUrl();
+    const nota = (titulo, texto, botones) => root.replaceChildren(h('section', { class: 'panel heima-nota' },
+      h('h2', null, titulo), h('p', { class: 'muted' }, texto), h('div', { class: 'row-actions' }, ...botones)));
+    if (!url) return nota('Heima', 'Heima es tu parte privada, servida por el NAS de casa. Pon su dirección en Ajustes → Heima.', [h('button', { type: 'button', class: 'btn primary small', onclick: openSettings }, 'Ir a Ajustes')]);
+    // Ya abierta con la misma dirección: no se recarga (Sincronizar y otros repintados no la tocan)
+    const marco = root.querySelector('iframe.heima-marco');
+    if (!forzar && marco && marco.dataset.url === url) return;
+    if (!forzar && heimaEstado && heimaEstado.url === url && heimaEstado.ok === false && Date.now() - heimaEstado.ts < 15000) return;
+    root.replaceChildren(h('section', { class: 'panel heima-nota' }, h('p', { class: 'muted' }, 'Buscando Heima en casa…')));
+    heimaPing(url).then(ok => {
+      heimaEstado = { url, ok, ts: Date.now() };
+      if (S.ui.view !== 'heima') return;
+      if (!ok) return nota('Heima solo está disponible en casa', 'No responde ' + url.replace(/^https:\/\//, '').replace(/\/$/, '') + '. Comprueba que estás en la red de casa y que el NAS está encendido. Si es la primera vez en este aparato, ábrelo aparte una vez: el navegador puede pedir permiso para acceder a la red local o avisar del certificado.', [
+        h('button', { type: 'button', class: 'btn primary small', onclick: () => renderHeima(true) }, 'Reintentar'),
+        h('button', { type: 'button', class: 'btn ghost small', onclick: () => window.open(url, '_blank', 'noopener') }, ICON.ext(), 'Abrir aparte')]);
+      root.replaceChildren(h('iframe', { class: 'heima-marco', src: url, title: 'Heima', dataset: { url }, referrerpolicy: 'no-referrer' }));
+    });
+  }
+  function heimaSection() {
+    const inp = h('input', { class: 'input', type: 'url', placeholder: HEIMA_EJEMPLO, 'aria-label': 'Dirección de Heima', autocomplete: 'off', inputmode: 'url' });
+    inp.value = heimaUrl();
+    const guardar = () => {
+      const v = inp.value.trim();
+      if (v && !/^https:\/\/[^\s]+$/.test(v)) { toast('La dirección tiene que empezar por https://', 'error'); return; }
+      S.datos.colecciones.ajustes = Object.assign({}, S.datos.colecciones.ajustes, { heima: { id: 'heima', url: v } });
+      saveDatos();
+      heimaEstado = null;
+      toast(v ? 'Dirección de Heima guardada' : 'Heima sin dirección');
+      if (S.ui.view === 'heima') renderHeima(true);
+    };
+    inp.addEventListener('keydown', e => { if (e.key === 'Enter') guardar(); });
+    return h('div', { class: 'modal-section' },
+      h('h3', null, 'Heima'),
+      h('p', { class: 'muted' }, 'Dirección de Heima en el NAS de casa (con https y el nombre .local del NAS, p. ej. ' + HEIMA_EJEMPLO + '). Solo funciona estando en casa.'),
+      h('div', { class: 'row-edit two' }, inp, h('button', { type: 'button', class: 'btn ghost small', onclick: guardar }, 'Guardar')));
+  }
+
   function openSettings() {
     const fileInput = h('input', { type: 'file', accept: 'application/json,.json', hidden: true });
     fileInput.addEventListener('change', async () => {
@@ -2951,6 +3006,7 @@
       odSection(),
       plSection(),
       ggSection(),
+      heimaSection(),
       dispSection(),
       h('div', { class: 'modal-section' },
         h('h3', null, 'Copia de seguridad'),
@@ -2989,6 +3045,7 @@
     contactos: { title: 'Contactos', eyebrow: 'Agenda y cumples', add: () => ctTab() === 'agenda' ? 'Nuevo contacto' : 'Elegir contactos', el: 'viewContactos', render: () => renderCumpledias(), onAdd: () => ctTab() === 'agenda' ? openEditContacto(null) : openCdPicker() },
     gastos: { title: 'Gastos', eyebrow: 'Pagos recurrentes', add: 'Nuevo gasto', el: 'viewGastos', render: () => renderGastos(), onAdd: () => openGasto(null) },
     consumos: { title: 'Consumos', eyebrow: 'Luz, gas, agua y coche', add: () => cTipo === 'coche' ? 'Repostar' : 'Subir facturas', el: 'viewConsumos', render: () => renderConsumos(), onAdd: () => cTipo === 'coche' ? openRepostaje(null) : pickFacturas() },
+    heima: { title: 'Heima', eyebrow: 'En casa', add: 'Abrir aparte', addIcon: 'ext', el: 'viewHeima', render: () => renderHeima(), onAdd: () => { const u = heimaUrl(); if (u) window.open(u, '_blank', 'noopener'); else openSettings(); } },
     auditoria: { title: 'Auditoría', eyebrow: 'Historial de cambios', add: 'Exportar CSV', addIcon: 'file', el: 'viewAuditoria', render: () => renderAuditoria(), onAdd: () => exportarAuditoria() }
   };
 

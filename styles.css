@@ -539,6 +539,16 @@ a.btn { text-decoration: none; }
   .nav-tools { padding-top: 6px; }
 }
 
+/* Muy bajas (600-660 px): iconos y logo algo menores para que quepan todas las opciones (con Heima son 10) */
+@media (max-height: 660px) {
+  .sidebar { gap: 6px; }
+  .brand-mark { width: 56px; height: 56px; border-radius: 14px; }
+  .brand-mark svg { width: 48px; height: 48px; }
+  .nav-item { padding: 3px 4px 2px; gap: 1px; }
+  .nav-item svg { width: 18px; height: 18px; }
+  .nav-tools { padding-top: 4px; }
+}
+
 /* Calendario (vista de mes) */
 .cal-nav { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .cal-nav h2 { margin: 0 4px; min-width: 150px; text-align: center; font-size: 16px; font-weight: 800; color: var(--text); text-transform: none; letter-spacing: 0; }
@@ -710,3 +720,10 @@ a.btn { text-decoration: none; }
 .input.buscar { width: auto; flex: 1 1 180px; min-width: 0; max-width: 280px; }
 .chips .input.buscar { height: 34px; padding-top: 0; padding-bottom: 0; }
 @media (max-width: 700px) { .input.buscar { max-width: none; flex-basis: 100%; } }
+
+/* Heima: la página del NAS embebida, ocupando toda la zona de contenido */
+#viewHeima { padding: 0 0 env(safe-area-inset-bottom); }
+#viewHeima .heima-nota { margin: 4px 28px; }
+.heima-marco { flex: 1; width: 100%; min-height: 0; border: 0; background: var(--bg, #0B0F15); }
+@media (max-width: 700px) { #viewHeima .heima-nota { margin: 4px 16px; } }
+.heima-nota h2 { margin: 0 0 6px; font-size: 18px; text-transform: none; letter-spacing: 0; color: var(--text); }
