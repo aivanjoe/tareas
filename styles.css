@@ -707,3 +707,6 @@ a.btn { text-decoration: none; }
 @media (max-width: 700px) { .g-filtros .legend { margin-left: 0; } .select.g-cat { flex: 1 1 160px; min-width: 0; } }
 .per-legend .lg::before { background: var(--c); }
 .g-manual { color: var(--danger, #F0857A); font-weight: 800; }
+.input.buscar { width: auto; flex: 1 1 180px; min-width: 0; max-width: 280px; }
+.chips .input.buscar { height: 34px; padding-top: 0; padding-bottom: 0; }
+@media (max-width: 700px) { .input.buscar { max-width: none; flex-basis: 100%; } }

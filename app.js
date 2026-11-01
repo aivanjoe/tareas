@@ -3039,6 +3039,7 @@
       h('button', { type: 'button', class: 'btn subtle small', onclick: () => { calMonth = null; calSel = null; renderCal(); } }, 'Hoy'),
       calVistaSeg(),
       h('button', { type: 'button', class: 'btn subtle small', onclick: () => openFestivos() }, 'Festivos'),
+      botonBuscarCal(),
       calLoading ? h('span', { class: 'muted' }, 'Leyendo…') : null,
       calLeyenda());
 
@@ -3123,6 +3124,7 @@
       h('button', { type: 'button', class: 'btn subtle small', onclick: () => { calMonth = null; calSel = null; renderCal(); } }, 'Hoy'),
       calVistaSeg(),
       h('button', { type: 'button', class: 'btn subtle small', onclick: () => openFestivos() }, 'Festivos'),
+      botonBuscarCal(),
       calLoading ? h('span', { class: 'muted' }, 'Leyendo…') : null,
       calLeyenda());
     const semana = h('div', { class: 'cal-week' }, dias.map(ymd => {
@@ -3191,6 +3193,11 @@
     return last ? { ini: last, ult: addDays(last, dur), pasado: true, rep: REP_TXT[freq] } : { ini, ult, pasado: true, rep: REP_TXT[freq] };
   }
   let calListaModo = 'proximos', calListaQ = '';
+  // En Mes y Semana: «Buscar» lleva a la Lista con el buscador listo
+  const botonBuscarCal = () => h('button', { type: 'button', class: 'btn subtle small', onclick: () => {
+    S.ui.calVista = 'lista'; saveUi(); calListaModo = 'proximos'; renderCal();
+    const b = document.querySelector('.agenda-bar input[type=search]'); if (b) b.focus();
+  } }, 'Buscar');
   function renderLista(root, today) {
     if (!S.cal.listaAt && ggTokenOk() && !calLoading) {
       calLoading = true;
@@ -3200,7 +3207,7 @@
     const conVisir = !!S.ui.calListaVisir, pasados = calListaModo === 'pasados';
     let filas = (S.cal.lista || []).map(e => Object.assign({ e }, ocurrencia(e, today)));
     // Los de Visir (cumpleaños, santos, gastos…): la próxima vez de cada uno, de lo ya leído
-    if (conVisir && !pasados) {
+    if ((conVisir || calListaQ.trim()) && !pasados) {
       const vistos = new Set();
       for (const e of S.cal.events.filter(x => x.key).sort((a, b) => a.start.localeCompare(b.start))) {
         const d = evDias(e);
@@ -3210,7 +3217,7 @@
       }
     }
     const q = normName(calListaQ);
-    filas = filas.filter(f => f.pasado === pasados && (!q || normName(f.e.title).includes(q)))
+    filas = filas.filter(f => f.pasado === pasados && coincide(q, f.e.title, f.app ? evOrigin(f.e) : ''))
       .sort((a, b) => pasados ? b.ini.localeCompare(a.ini) : a.ini.localeCompare(b.ini) || (a.e.allDay === b.e.allDay ? a.e.start.localeCompare(b.e.start) : a.e.allDay ? -1 : 1));
     const f = (ymd, o) => new Date(utcDay(ymd)).toLocaleDateString('es-ES', Object.assign({ timeZone: 'UTC' }, o)).replace(/\./g, '');
     const cuenta = x => {
@@ -3235,7 +3242,7 @@
         h('span', { class: 'agenda-cuenta' }, cuenta(x))));
     }
     if (!filas.length) lista.append(h('p', { class: 'muted empty-note' }, q ? 'Nada coincide con la búsqueda.' : pasados ? 'Sin eventos en el último año.' : S.cal.listaAt ? 'No tienes eventos próximos. Créalos con «Nuevo evento».' : ggTokenOk() ? 'Leyendo…' : 'Sincroniza para ver aquí tus eventos.'));
-    const buscar = h('input', { class: 'input', type: 'search', placeholder: 'Buscar', 'aria-label': 'Buscar eventos', value: calListaQ, autocomplete: 'off' });
+    const buscar = h('input', { class: 'input', type: 'search', placeholder: 'Buscar en el calendario', 'aria-label': 'Buscar eventos', value: calListaQ, autocomplete: 'off' });
     buscar.addEventListener('input', () => { calListaQ = buscar.value; const pos = buscar.selectionStart; renderCal(); const b = document.querySelector('.agenda-bar input[type=search]'); if (b) { b.focus(); try { b.setSelectionRange(pos, pos); } catch (er) { /* */ } } });
     const visir = h('input', { type: 'checkbox', id: 'agVisir', checked: conVisir });
     visir.addEventListener('change', () => { S.ui.calListaVisir = visir.checked; saveUi(); renderCal(); });
@@ -4452,6 +4459,20 @@
   let rYear = null;        // año del resumen (null: el actual)
   let gChart = null;
   let gCat = 'Todas';
+  let gQ = ''; // buscador de Gastos (Próximos e Historial)
+  // Campo de búsqueda que vuelve a pintar la pantalla al escribir sin perder el foco ni la posición del cursor
+  function campoBuscar(valor, set, repintar, cls, placeholder) {
+    const inp = h('input', { class: 'input buscar ' + cls, type: 'search', placeholder: placeholder || 'Buscar', 'aria-label': placeholder || 'Buscar', value: valor, autocomplete: 'off' });
+    inp.addEventListener('input', () => {
+      set(inp.value);
+      const pos = inp.selectionStart;
+      repintar();
+      const b = document.querySelector('input.' + cls);
+      if (b) { b.focus(); try { b.setSelectionRange(pos, pos); } catch (e) { /* algunos navegadores no lo admiten en type=search */ } }
+    });
+    return inp;
+  }
+  const coincide = (q, ...textos) => { const n = normName(q); return !n || n.split(' ').every(w => normName(textos.filter(Boolean).join(' ')).includes(w)); };
   let gPer = 'todos'; // todos | mensuales | periodicos
   // Mensual: se cobra todos los meses; periódico: el resto (trimestral, anual…)
   const esMensual = g => (Array.isArray(g.meses) && g.meses.length ? g.meses.length === 12 : (g.periodicidad || 'mensual') === 'mensual');
@@ -4570,7 +4591,8 @@
     const cats = ['Todas'].concat(CATEGORIAS.filter(c => gastos().some(g => g.categoria === c)));
     if (!cats.includes(gCat)) gCat = 'Todas';
 
-    const inCat = x => (gCat === 'Todas' || x.g.categoria === gCat) && (gPer === 'todos' || (gPer === 'mensuales') === esMensual(x.g));
+    const inCat = x => (gCat === 'Todas' || x.g.categoria === gCat) && (gPer === 'todos' || (gPer === 'mensuales') === esMensual(x.g)) &&
+      coincide(gQ, x.g.concepto, x.g.proveedor, x.g.categoria, x.g.notas, PERIODO_NOMBRE[x.g.periodicidad], COBROS[cobroDe(x.g)]);
     const perSeg = h('div', { class: 'seg', role: 'group', 'aria-label': 'Periodicidad' },
       [['todos', 'Todos'], ['mensuales', 'Mensuales'], ['periodicos', 'Periódicos']].map(([k, label]) =>
         h('button', { type: 'button', class: gPer === k ? 'on' : '', 'aria-pressed': gPer === k ? 'true' : 'false', onclick: () => { gPer = k; renderGastos(); } }, label)));
@@ -4582,7 +4604,7 @@
       list.append(h('p', { class: 'list-sep' }, 'Pausados'));
       for (const g of pausados.sort((a, b) => a.concepto.localeCompare(b.concepto, 'es'))) list.append(gastoRow(g, null, null, true));
     }
-    if (!rows.length && !pausados.length) list.append(h('p', { class: 'muted empty-note' }, gastos().length ? 'No hay gastos en esta categoría.' : 'Crea tu primer gasto recurrente con «Nuevo gasto».'));
+    if (!rows.length && !pausados.length) list.append(h('p', { class: 'muted empty-note' }, gastos().length ? (gQ ? 'Ningún gasto coincide con la búsqueda.' : 'No hay gastos en esta categoría.') : 'Crea tu primer gasto recurrente con «Nuevo gasto».'));
 
     root.replaceChildren(
       h('div', { class: 'stats three' },
@@ -4590,7 +4612,7 @@
         stat('Mes que viene', fmtEur(sum(mesQueViene)), mesQueViene.length + (mesQueViene.length === 1 ? ' cobro' : ' cobros') + ' en ' + nombreMes),
         stat('Vencidos', String(vencidos.length), vencidos.length ? fmtEur(sum(vencidos)) + ' sin registrar' : 'todo al día', vencidos.length ? 'danger' : '')),
       head,
-      h('section', { class: 'panel' }, h('div', { class: 'g-filtros' }, perSeg, catSelect(cats), perLeyenda()), list));
+      h('section', { class: 'panel' }, h('div', { class: 'g-filtros' }, perSeg, catSelect(cats), campoBuscar(gQ, v => { gQ = v; }, renderGastos, 'g-buscar', 'Buscar gasto'), perLeyenda()), list));
   }
 
   // Forma de pago de un gasto ('automatico' = domiciliado, como guardaban las versiones anteriores; sin dato, domiciliado)
@@ -4721,11 +4743,12 @@
     if (!years.includes(hYear)) hYear = 'Todos';
     const cats = ['Todas'].concat(CATEGORIAS.filter(c => all.some(p => p.categoria === c)));
     if (!cats.includes(gCat)) gCat = 'Todas';
-    const shown = all.filter(p => (hYear === 'Todos' || p.fecha.startsWith(hYear)) && (gCat === 'Todas' || p.categoria === gCat));
+    const shown = all.filter(p => (hYear === 'Todos' || p.fecha.startsWith(hYear)) && (gCat === 'Todas' || p.categoria === gCat) && coincide(gQ, p.concepto, p.categoria, p.notas));
     const total = shown.reduce((a, p) => a + (Number(p.importe) || 0), 0);
 
     const chips = h('div', { class: 'chips' },
       catSelect(cats),
+      campoBuscar(gQ, v => { gQ = v; }, renderGastos, 'h-buscar', 'Buscar pago'),
       h('span', { class: 'chips-sep' }),
       years.map(y => h('button', {
         type: 'button', class: 'chip' + (hYear === y ? ' on' : ''), style: '--c:#C9D0DC', 'aria-pressed': hYear === y ? 'true' : 'false',
