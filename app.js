@@ -3149,7 +3149,7 @@
           quitarFestivo(f.fecha);
           saveDatos(); pinta(); if (S.ui.view === 'calendario') renderCal();
         } }, ICON.trash())));
-      body.replaceChildren(
+      body.replaceChildren(...[
         h('div', { class: 'fest-anio' },
           h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Año anterior', onclick: () => { anio--; editando = null; pinta(); } }, ICON.left()),
           h('h3', null, String(anio)),
@@ -3165,7 +3165,8 @@
         filas.length ? h('div', { class: 'fest-list' }, filas) : h('p', { class: 'muted empty-note' }, 'Sin festivos en ' + anio + '.'),
         editando === 'nuevo' ? formulario(null) : h('div', { class: 'row-actions' },
           h('button', { type: 'button', class: 'btn ghost small', onclick: () => { editando = 'nuevo'; pinta(); } }, ICON.plus(), 'Añadir día')),
-        h('p', { class: 'hint' }, 'Cada festivo sale en tu calendario como «Festivo · nombre», en rojo, y el día se sombrea en Visir. Añade aquí también los días que os da la empresa.'));
+        h('p', { class: 'hint' }, 'Cada festivo sale en tu calendario como «Festivo · nombre», en rojo, y el día se sombrea en Visir. Añade aquí también los días que os da la empresa.')
+      ].filter(Boolean)); // replaceChildren escribe «null» si le llega un hueco
     };
     pinta();
     openModal('Festivos', body);
