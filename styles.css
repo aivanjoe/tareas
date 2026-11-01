@@ -730,20 +730,23 @@ a.btn { text-decoration: none; }
 
 /* Heima en el menú: como el logo de Visir en pequeño (cuadrado lima con la runa othala, ᛟ, protección de la casa,
    y el nombre en lima, dentro de un marco fino), debajo de Ajustes */
-.nav-item.heima-item { align-self: center; width: max-content; gap: 4px; margin-top: 10px; padding: 6px 6px 4px; border: 1.5px solid rgba(219, 242, 102, 0.55); border-radius: 18px; }
+.nav-item.heima-item { align-self: center; width: max-content; gap: 4px; margin-top: 30px; padding: 6px 6px 4px; border: 1.5px solid rgba(219, 242, 102, 0.55); border-radius: 18px; }
 .nav-item.heima-item:hover { border-color: var(--accent); background: rgba(219, 242, 102, 0.06); }
 .nav-item.heima-item.active { border-color: var(--accent); background: rgba(219, 242, 102, 0.14); }
 .heima-mark { width: 42px; height: 42px; border-radius: 11px; background: var(--accent); color: var(--bg); display: grid; place-items: center; }
 .nav-item .heima-mark svg { width: 34px; height: 34px; fill: none; stroke: currentColor; stroke-width: 6; stroke-linecap: square; stroke-linejoin: miter; }
 .heima-name { font-size: 10.5px; font-weight: 800; letter-spacing: 0.2em; padding-left: 0.2em; text-transform: uppercase; color: var(--accent); }
+@media (max-height: 900px) {
+  .nav-item.heima-item { margin-top: 20px; }
+}
 @media (max-height: 720px) {
-  .nav-item.heima-item { margin-top: 6px; padding: 4px 5px 3px; border-radius: 15px; }
+  .nav-item.heima-item { margin-top: 10px; padding: 4px 5px 3px; border-radius: 15px; }
   .heima-mark { width: 34px; height: 34px; border-radius: 9px; }
   .nav-item .heima-mark svg { width: 27px; height: 27px; }
   .heima-name { font-size: 9.5px; }
 }
 @media (max-height: 660px) {
-  .nav-item.heima-item { margin-top: 4px; gap: 2px; }
+  .nav-item.heima-item { margin-top: 6px; gap: 2px; }
   .heima-mark { width: 28px; height: 28px; border-radius: 8px; }
   .nav-item .heima-mark svg { width: 22px; height: 22px; }
 }
