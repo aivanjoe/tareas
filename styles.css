@@ -575,16 +575,16 @@ a.btn { text-decoration: none; }
 
 /* Santos (violeta) */
 .cd-side { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
-.ev.cd-santo { border-color: rgba(183, 156, 240, 0.35); cursor: pointer; }
-.ev-badge.santo { background: rgba(183, 156, 240, 0.16); color: #B79CF0; }
-.ev-badge.santo svg { stroke: #B79CF0; }
+.ev.cd-santo { border-color: rgba(76, 195, 138, 0.35); cursor: pointer; }
+.ev-badge.santo { background: rgba(76, 195, 138, 0.16); color: #4CC38A; }
+.ev-badge.santo svg { stroke: #4CC38A; }
 .ev.today.cd-santo { border-color: color-mix(in srgb, var(--accent) 60%, transparent); }
 .santos-panel .hint { margin: 0; }
 .santos-list { display: flex; flex-direction: column; gap: 6px; }
 .santo-row { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 8px 10px; border-radius: 10px; border: 1px solid var(--line); background: var(--card); }
-.santo-row.on { border-color: rgba(183, 156, 240, 0.45); }
+.santo-row.on { border-color: rgba(76, 195, 138, 0.45); }
 .santo-row .pick-box { cursor: pointer; background: transparent; padding: 0; }
-.santo-row .pick-box.on { background: #B79CF0; border-color: #B79CF0; }
+.santo-row .pick-box.on { background: #4CC38A; border-color: #4CC38A; }
 .santo-row .ev-what { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .santo-gen { display: grid; grid-template-columns: 110px minmax(0, 1fr); gap: 10px; align-items: center; }
 .date-parts.two { grid-template-columns: 70px minmax(0, 1fr); }
@@ -675,3 +675,9 @@ a.btn { text-decoration: none; }
   .fest-tipo { display: none; }
   .fest-campos { grid-template-columns: minmax(0, 1fr); }
 }
+
+/* Ventana de reconectar */
+.recon-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 14px; border-radius: 12px; background: color-mix(in srgb, var(--danger) 9%, var(--card)); border: 1px solid color-mix(in srgb, var(--danger) 35%, transparent); }
+.recon-txt { display: flex; flex-direction: column; gap: 3px; font-size: 13.5px; color: var(--text2); }
+.recon-txt strong { font-size: 15px; color: var(--text); }
+@media (max-width: 560px) { .recon-row { flex-direction: column; align-items: stretch; } }

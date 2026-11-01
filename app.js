@@ -846,7 +846,7 @@
     } catch (e) {
       res = finSync('onedrive', opts, null, e.message || 'Error al sincronizar con OneDrive.', e.kind);
       S.odState = e.kind === 'login' ? 'login' : 'error';
-      if (e.kind === 'login') toast(e.message, 'error', { label: 'Conectar', fn: odConnect }, 10000);
+      if (e.kind === 'login') pedirReconexion('OneDrive', 'La sesión de OneDrive ha caducado: tus datos de Visir no se guardan en la nube hasta que reconectes.', odConnect, { auto: !opts.manual });
       else toast(e.message || 'Error al sincronizar con OneDrive.', 'error');
     } finally {
       renderSyncState();
@@ -1080,7 +1080,7 @@
     } catch (e) {
       res = finSync('planner', opts, null, e.message, e.kind);
       S.plState = e.kind === 'login' ? 'login' : 'error';
-      if (e.kind === 'login') toast(e.message, 'error', { label: 'Conectar', fn: plConnect }, 10000);
+      if (e.kind === 'login') pedirReconexion('Planner', 'La sesión del trabajo ha caducado (dura un día): reconecta para ver y cambiar tus tareas de Planner.', plConnect, { auto: !opts.manual });
       else toast(e.message || 'Error al leer Planner.', 'error');
     } finally {
       renderAll();
@@ -1090,7 +1090,7 @@
 
   // Si una escritura falla se avisa y se vuelve a leer Planner
   async function plRecover(e) {
-    if (e.kind === 'login') { S.plState = 'login'; renderSyncState(); toast(e.message, 'error', { label: 'Conectar', fn: plConnect }, 10000); return; }
+    if (e.kind === 'login') { S.plState = 'login'; renderSyncState(); pedirReconexion('Planner', 'La sesión del trabajo ha caducado y el cambio no se ha guardado en Planner. Reconecta y vuelve a hacerlo.', plConnect); return; }
     toast(e.message || 'Planner no aceptó el cambio.', 'error');
     await plSync();
   }
@@ -1497,7 +1497,7 @@
     } catch (e) {
       res = finSync('contactos', opts, null, e.message, e.kind);
       S.ggState = e.kind === 'login' ? 'login' : 'error';
-      if (e.kind === 'login') toast(e.message, 'error', { label: 'Conectar', fn: ggLogin }, 10000);
+      if (e.kind === 'login') pedirReconexion('Google', 'El permiso de Google ha caducado (dura una hora): reconecta para actualizar contactos y calendario.', ggLogin, { auto: !opts.manual });
       else toast(e.message || 'Error al leer los contactos de Google.', 'error');
     } finally {
       renderSyncState();
@@ -1651,7 +1651,7 @@
       // Los del santoral, solo si alguien de Cumples se llama así; los añadidos a mano, siempre (decisión del usuario)
       if (!st.calendario || (!st.personas.length && !st.manual)) continue;
       ev('santo:' + st.clave, santoTitulo(st), year + '-' + (st.fecha === '02-29' && !isLeap(year) ? '02-28' : st.fecha), {
-        recurrence: [st.fecha === '02-29' ? 'RRULE:FREQ=YEARLY;BYMONTH=2;BYMONTHDAY=-1' : 'RRULE:FREQ=YEARLY'], colorId: '3',
+        recurrence: [st.fecha === '02-29' ? 'RRULE:FREQ=YEARLY;BYMONTH=2;BYMONTHDAY=-1' : 'RRULE:FREQ=YEARLY'], colorId: '10',
         description: (st.personas.length ? 'Lo celebran: ' + st.personas.map(shortName).join(', ') + '.\n' : '') + 'Creado por Visir.'
       });
     }
@@ -1746,7 +1746,7 @@
     } catch (e) {
       res = finSync('calendario', opts, null, e.message || 'Error con Google Calendar.', e.kind);
       S.calState = 'error';
-      if (e.kind === 'login') { S.calState = 'idle'; toast(e.message, 'error', { label: 'Conectar', fn: ggLogin }, 10000); }
+      if (e.kind === 'login') { S.calState = 'idle'; pedirReconexion('Google', 'El permiso de Google ha caducado (dura una hora): reconecta para poner al día tu calendario.', ggLogin, { auto: !opts.manual }); }
       else if (e.kind === 'scope') toast(e.message, 'error', { label: 'Dar permiso', fn: () => ggLogin(true) }, 15000);
       else toast(e.message || 'Error con Google Calendar.', 'error');
     } finally {
@@ -1756,8 +1756,32 @@
     return res;
   }
 
+  // ---- reconectar: ventana en el centro (no un aviso abajo que se pierde) ----
+  // Junta en una sola ventana los servicios que hay que reconectar. Las peticiones automáticas
+  // (por ejemplo, un cambio que no puede llegar al calendario) no se repiten antes de 10 minutos.
+  const reconexiones = new Map(); // servicio -> { texto, fn }
+  const ultimaPeticion = {};
+  let reconCerrar = null, reconPintar = null;
+  function pedirReconexion(servicio, texto, fn, opts = {}) {
+    if (opts.auto && Date.now() - (ultimaPeticion[servicio] || 0) < 600000) return;
+    ultimaPeticion[servicio] = Date.now();
+    reconexiones.set(servicio, { texto, fn });
+    if (reconPintar) { reconPintar(); return; }
+    const body = h('div', { class: 'form' });
+    reconPintar = () => body.replaceChildren(...[
+      ...[...reconexiones].map(([sv, r]) => h('div', { class: 'recon-row' },
+        h('div', { class: 'recon-txt' }, h('strong', null, sv), h('span', null, r.texto)),
+        h('button', { type: 'button', class: 'btn primary small', onclick: () => { reconexiones.clear(); reconCerrar(); r.fn(); } }, 'Reconectar'))),
+      h('div', { class: 'row-actions modal-foot' }, h('span', { class: 'spacer' }),
+        h('button', { type: 'button', class: 'btn subtle small', onclick: () => reconCerrar() }, 'Ahora no'))
+    ]);
+    reconPintar();
+    reconCerrar = openModal(reconexiones.size > 1 ? 'Hay que reconectar' : 'Hay que reconectar ' + servicio, body, { onClose: () => { reconexiones.clear(); reconPintar = null; reconCerrar = null; } });
+  }
+
   // Tras un cambio en datos que afectan al calendario, se pone al día al poco (si el permiso sigue vigente)
   function calSchedule() {
+    if (calReady() && !ggTokenOk()) { pedirReconexion('Google', 'Tu cambio está guardado en Visir, pero no llegará a tu calendario de Google hasta que reconectes (el permiso dura una hora).', ggLogin, { auto: true }); return; }
     if (!calReady() || !ggTokenOk()) return;
     clearTimeout(calTimer);
     calTimer = setTimeout(() => calSync(), 2500);
@@ -3218,7 +3242,7 @@
   // Crear (ev = null) o editar un evento del calendario. Los repetidos se editan como serie.
   async function openCalEvent(ev) {
     if (!calReady()) { toast('Elige antes un calendario en Ajustes.', 'error'); return; }
-    if (!ggTokenOk()) { toast('El permiso de Google ha caducado.', 'error', { label: 'Reconectar', fn: ggLogin }, 10000); return; }
+    if (!ggTokenOk()) { pedirReconexion('Google', 'El permiso de Google ha caducado (dura una hora): reconecta para crear o cambiar eventos.', ggLogin); return; }
     const cid = encodeURIComponent(calCfg().calendarId);
     let src = null;
     if (ev) {
@@ -3297,7 +3321,7 @@
       if (S.ui.view === 'calendario') renderCal();
     };
     const fallo = e => {
-      if (e.kind === 'login') toast(e.message, 'error', { label: 'Reconectar', fn: ggLogin }, 10000);
+      if (e.kind === 'login') pedirReconexion('Google', 'El permiso de Google ha caducado y el evento no se ha guardado. Reconecta y vuelve a hacerlo.', ggLogin);
       else if (e.kind === 'scope') toast(e.message, 'error', { label: 'Dar permiso', fn: () => ggLogin(true) }, 15000);
       else toast(e.message || 'Google Calendar no ha aceptado el cambio.', 'error', null, 10000);
     };
@@ -3367,7 +3391,7 @@
   // Elegir el calendario de Google (se guarda en el almacén: vale para todos los dispositivos)
   async function openCalPicker() {
     if (!S.gg.cal) { ggLogin(true); return; }
-    if (!ggTokenOk()) { toast('El permiso de Google ha caducado: reconecta y vuelve a elegir.', 'error', { label: 'Conectar', fn: ggLogin }, 10000); return; }
+    if (!ggTokenOk()) { pedirReconexion('Google', 'El permiso de Google ha caducado: reconecta y vuelve a elegir el calendario.', ggLogin); return; }
     let cals;
     try { cals = await calList(); } catch (e) { toast(e.message, 'error'); return; }
     if (!cals.length) { toast('No hay calendarios en los que puedas escribir.', 'error'); return; }
@@ -3819,7 +3843,7 @@
   // contactos seguidos en Cumples, el usuario elige qué santos van al calendario (uno por nombre).
   // Colección "santos": { id: clave (nombre normalizado), nombre, fecha: 'MM-DD', genero: 'm'|'f',
   // calendario: bool, manual: bool }. Solo se guarda lo que el usuario toca; el resto sale del santoral.
-  const SANTO_COLOR = '#B79CF0';
+  const SANTO_COLOR = '#4CC38A'; // verde (en Google, color 10 «albahaca»); el lila se confundía con el color del calendario
   // Fecha más habitual en España
   const SANTORAL = {
     '01-01': 'Manuel Manuela', '01-06': 'Reyes', '01-10': 'Gonzalo', '01-17': 'Antón', '01-19': 'Mario',
@@ -4707,7 +4731,7 @@
       setTimeout(() => URL.revokeObjectURL(obj), 120000);
     } catch (e) {
       if (w) w.close();
-      if (e.kind === 'login') toast(e.message, 'error', { label: 'Conectar', fn: odConnect }, 10000);
+      if (e.kind === 'login') pedirReconexion('OneDrive', 'La sesión de OneDrive ha caducado: reconecta para abrir la factura.', odConnect);
       else toast(e.message || 'No se pudo abrir la factura.', 'error');
     }
   }
@@ -5423,7 +5447,7 @@
       if (ggConnected() && ggTokenOk()) trabajos.push(syncContactos({ notify: v === 'contactos', manual: true }).then(async r => [r, await calSync({ notify: v === 'calendario', manual: true })]));
       // Sin permiso vigente no se sale de la página, pero se avisa de que Google se queda sin actualizar
       else if (ggConnected()) {
-        toast('El permiso de Google ha caducado: reconecta para actualizar ' + (calReady() ? 'el calendario y los contactos.' : 'los contactos.'), 'error', { label: 'Reconectar', fn: ggLogin }, 10000);
+        pedirReconexion('Google', 'El permiso de Google ha caducado (dura una hora): ' + (calReady() ? 'el calendario y los contactos' : 'los contactos') + ' no se han actualizado.', ggLogin);
         trabajos.push(Promise.resolve({ fuente: 'google', detalle: [], error: null, reconectar: true, texto: 'Google: hay que reconectar (permiso caducado)' }));
       }
       // Planner: si la sesión del trabajo caducó, este clic lleva a reconectar
