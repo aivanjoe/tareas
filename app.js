@@ -2253,16 +2253,16 @@
       const rec = ed.recurring;
       const inp = (id, type, k, label) => {
         const x = h('input', { class: 'input', id, type, value: ed[k] || '', 'aria-label': label, disabled: rec && (k === 'fecha' || k === 'hora') });
-        x.addEventListener('change', () => { ed[k] = x.value; if (k === 'hora' || k === 'fecha') pintaHasta(); });
+        // 'input' además de 'change': en iPad/iPhone 'change' no llega hasta salir del campo
+        const upd = () => { ed[k] = x.value; if (k === 'hora' || k === 'fecha') pintaHasta(); };
+        x.addEventListener('input', upd); x.addEventListener('change', upd);
         return x;
       };
       const fF = inp('taskFecha', 'date', 'fecha', 'Fecha'), fH = inp('taskHora', 'time', 'hora', 'Hora (opcional)');
       const hF = inp('taskHastaF', 'date', 'hastaF', 'Hasta el día'), hH = inp('taskHastaH', 'time', 'hastaH', 'Hasta la hora');
       const hasta = h('div', { class: 'fecha-fila' });
-      const pintaHasta = () => {
-        hH.hidden = !ed.hora;
-        hasta.hidden = !ed.fecha;
-      };
+      // «Hasta» siempre a la vista; la hora de fin, solo si hay hora de inicio
+      const pintaHasta = () => { hH.hidden = !ed.hora; };
       hasta.append(h('span', { class: 'fecha-hasta' }, 'Hasta'), hF, hH);
       pintaHasta();
       fechaField = h('div', { class: 'field' },
