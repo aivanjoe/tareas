@@ -746,7 +746,14 @@
           if (res.state === 'planner' || !isPersonalAcc(res.account)) plLoggedIn(res.account);
           else odLoggedIn(res.account, true);
         }
+        if (res && res.account) sessionStorage.removeItem(MS_SILENCIOSO);
       } catch (e) {
+        // El intento sin pantalla (prompt=none) no ha valido: se va al inicio de sesión normal
+        const sil = msSilencioso();
+        if (sil && !sil.normal && /interaction_required|login_required|consent_required|account_selection_required|no_tokens_found|invalid_grant/.test((e && (e.errorCode + ' ' + e.message)) || '')) {
+          setTimeout(() => msLogin(sil.s).catch(err => toast('No se pudo conectar con Microsoft: ' + (err.errorMessage || err.message || err.errorCode), 'error', null, 10000)), 0);
+          return app;
+        }
         const cancelled = /access_denied|user_cancelled/.test((e && (e.errorCode + ' ' + e.message)) || '');
         toast(cancelled ? 'Has cancelado el inicio de sesión de Microsoft.' : 'No se pudo iniciar sesión con Microsoft: ' + (e.errorMessage || e.message || e.errorCode), 'error', null, 10000);
       }
@@ -778,14 +785,40 @@
 
   // Login por redirección: la página va a Microsoft y vuelve; al volver lo procesa loadMsal().
   // (Sin ventana emergente: el login de Microsoft aísla su ventana y MSAL 4 deja de poder leerla.)
+  // Reconectar (OneDrive o Planner). Si ya hay cuenta, primero se intenta sin pantalla (prompt=none):
+  // si la sesión de Microsoft sigue abierta en el navegador, va y vuelve sin pedir nada. Si no vale,
+  // al volver se repite con la pantalla normal (la marca evita repetir el intento sin pantalla en bucle).
+  const MS_SILENCIOSO = 'mp.ms.silencioso';
+  function msSilencioso() {
+    try { const v = JSON.parse(sessionStorage.getItem(MS_SILENCIOSO) || 'null'); return v && Date.now() - v.t < 120000 ? v : null; }
+    catch (e) { return null; }
+  }
+  async function msLogin(servicio) {
+    if (!msalApp) await loadMsal();
+    clearStaleInteraction();
+    const pl = servicio === 'planner';
+    const acc = pl ? plAccount() : odAccount();
+    const hint = pl ? S.pl.account : acc && acc.username;
+    const req = { scopes: pl ? PL_SCOPES : OD_SCOPES };
+    if (pl) { req.authority = ORG_AUTH; req.state = 'planner'; }
+    if (hint) req.loginHint = hint;
+    const sil = msSilencioso();
+    if (hint && !(sil && sil.s === servicio)) {
+      sessionStorage.setItem(MS_SILENCIOSO, JSON.stringify({ s: servicio, t: Date.now() }));
+      req.prompt = 'none';
+    } else if (pl) {
+      if (sil) sessionStorage.setItem(MS_SILENCIOSO, JSON.stringify(Object.assign(sil, { normal: true })));
+      if (!hint) req.prompt = 'select_account';
+    } else {
+      if (sil) sessionStorage.setItem(MS_SILENCIOSO, JSON.stringify(Object.assign(sil, { normal: true })));
+      req.prompt = 'select_account';
+    }
+    await msalApp.loginRedirect(req);
+  }
+
   async function odConnect() {
     try {
-      if (!msalApp) await loadMsal();
-      clearStaleInteraction();
-      const acc = odAccount();
-      const req = { scopes: OD_SCOPES, prompt: 'select_account' };
-      if (acc) req.loginHint = acc.username;
-      await msalApp.loginRedirect(req);
+      await msLogin('onedrive');
     } catch (e) {
       toast('No se pudo conectar con OneDrive: ' + (e.errorMessage || e.message || e.errorCode), 'error', null, 10000);
     }
@@ -922,8 +955,8 @@
     } catch (e) {
       res = finSync('onedrive', opts, null, e.message || 'Error al sincronizar con OneDrive.', e.kind);
       S.odState = e.kind === 'login' ? 'login' : 'error';
-      if (e.kind === 'login') pedirReconexion('OneDrive', 'La sesión de OneDrive ha caducado: tus datos de Visir no se guardan en la nube hasta que reconectes.', odConnect, { auto: !opts.manual });
-      else toast(e.message || 'Error al sincronizar con OneDrive.', 'error');
+      if (e.kind === 'login') pedirReconexion('OneDrive', 'La sesión de OneDrive ha caducado: tus datos de Visir no se guardan en la nube hasta que reconectes.', odConnect, { auto: !opts.manual && !opts.notify });
+      else if (opts.manual || opts.notify) toast(e.message || 'Error al sincronizar con OneDrive.', 'error');
     } finally {
       renderSyncState();
       if (odAgain) { odAgain = false; odSchedulePush(); }
@@ -1017,11 +1050,7 @@
   async function plConnect() {
     if (!S.od.clientId) { toast('Primero pon el Id. de aplicación de Microsoft en Ajustes → OneDrive.', 'error'); return; }
     try {
-      if (!msalApp) await loadMsal();
-      clearStaleInteraction();
-      const req = { scopes: PL_SCOPES, authority: ORG_AUTH, prompt: 'select_account', state: 'planner' };
-      if (S.pl.account) { req.loginHint = S.pl.account; delete req.prompt; }
-      await msalApp.loginRedirect(req);
+      await msLogin('planner');
     } catch (e) {
       toast('No se pudo conectar con Planner: ' + (e.errorMessage || e.message || e.errorCode), 'error', null, 10000);
     }
@@ -1032,9 +1061,9 @@
     S.pl.account = account.username || account.name || 'Cuenta del trabajo';
     savePl();
     S.plState = 'idle';
-    toast('Planner conectado');
+    toast(antes ? 'Planner reconectado' : 'Planner conectado');
     audit('planner', 'conexion', antes ? 'Planner reconectado' : 'Planner conectado');
-    plSync();
+    plReanudar().catch(() => null).then(() => plSync());
   }
 
   async function plDisconnect() {
@@ -1069,7 +1098,7 @@
   function describePl(method, path, body) {
     const q = x => '«' + String(x || '').slice(0, 80) + '»';
     const m = /^\/planner\/tasks\/([^/]+)(\/details)?$/.exec(path);
-    const t = m ? plTask(m[1]) : null, nom = q((body && body.title) || (t && t.title) || 'tarea');
+    const t = m ? plTask(m[1]) || plQuitadas[m[1]] : null, nom = q((body && body.title) || (t && t.title) || 'tarea');
     if (method === 'POST' && path === '/planner/tasks') return 'Tarea creada: ' + nom;
     if (/\/planner\/plans\/[^/]+\/details$/.test(path)) return 'Nombres de las etiquetas del plan cambiados';
     if (m && m[2]) return 'Notas guardadas en ' + nom;
@@ -1086,11 +1115,52 @@
     return 'Cambio en Planner';
   }
 
-  async function plCall(method, path, body, etag) {
+  // Con la sesión caducada, el cambio no se pierde: se apunta (con su etag) y se envía al reconectar
+  async function plCall(method, path, body, etag, reintento) {
     if (method === 'GET') return plCallRaw(method, path, body, etag);
     const desc = describePl(method, path, body);
     try { const r = await plCallRaw(method, path, body, etag); audit('planner', 'cambio', desc); return r; }
-    catch (e) { audit('planner', 'error', 'No se pudo guardar en Planner: ' + desc, { detalle: [e.message] }); throw e; }
+    catch (e) {
+      if (e.kind === 'login') { if (!reintento) plEncolar({ method, path, body, etag, desc }); throw e; }
+      audit('planner', 'error', 'No se pudo guardar en Planner: ' + desc, { detalle: [e.message] });
+      throw e;
+    }
+  }
+
+  // Cambios pendientes de Planner (localStorage, así sobreviven a la ida y vuelta del login; un día como mucho)
+  const PL_PEND = 'mp.planner.pendientes';
+  function plPendientes() {
+    try { return (JSON.parse(localStorage.getItem(PL_PEND) || '[]') || []).filter(o => Date.now() - o.t < 86400000); }
+    catch (e) { return []; }
+  }
+  function plEncolar(op) {
+    try { localStorage.setItem(PL_PEND, JSON.stringify(plPendientes().concat(Object.assign({ t: Date.now() }, op)))); }
+    catch (e) { /* almacenamiento no disponible */ }
+  }
+  // Al volver del login: se envían en orden. Si una tarea se cambió dos veces, la segunda llevaba el etag
+  // de antes de la primera: se lee el nuevo y se repite (solo en ese caso; si la cambió otro, se avisa).
+  async function plReanudar() {
+    const ops = plPendientes();
+    localStorage.removeItem(PL_PEND);
+    if (!ops.length) return;
+    let ok = 0;
+    const fallos = [], tocadas = new Set();
+    for (let i = 0; i < ops.length; i++) {
+      const o = ops[i];
+      try { await plCall(o.method, o.path, o.body, o.etag, true); ok++; }
+      catch (e) {
+        let err = e;
+        if (e.kind === 'conflict' && o.etag && tocadas.has(o.path)) {
+          try { const cur = await plCallRaw('GET', o.path); await plCall(o.method, o.path, o.body, plEtag(cur), true); ok++; err = null; }
+          catch (e2) { err = e2; }
+        }
+        if (err && err.kind === 'login') { ops.slice(i).forEach(x => plEncolar(x)); break; }
+        if (err) fallos.push(o.desc);
+      }
+      tocadas.add(o.path);
+    }
+    if (fallos.length) toast('No se pudo guardar en Planner: ' + fallos.join('; ') + '. Revísalo.', 'error', null, 12000);
+    else if (ok) toast(ok === 1 ? 'Cambio guardado en Planner' : ok + ' cambios guardados en Planner');
   }
   async function plCallRaw(method, path, body, etag) {
     const token = await plToken();
@@ -1165,8 +1235,15 @@
   }
 
   // Si una escritura falla se avisa y se vuelve a leer Planner
+  let plYendo = false;
   async function plRecover(e) {
-    if (e.kind === 'login') { S.plState = 'login'; renderSyncState(); pedirReconexion('Planner', 'La sesión del trabajo ha caducado y el cambio no se ha guardado en Planner. Reconecta y vuelve a hacerlo.', plConnect); return; }
+    // Sesión caducada: el cambio ya está apuntado; se va a reconectar (sin pantalla si se puede) y al volver se envía
+    if (e.kind === 'login') {
+      S.plState = 'login';
+      renderSyncState();
+      if (!plYendo) { plYendo = true; toast('La sesión del trabajo ha caducado: reconectando para guardar el cambio…'); setTimeout(plConnect, 700); }
+      return;
+    }
     toast(e.message || 'Planner no aceptó el cambio.', 'error');
     await plSync();
   }
@@ -1216,9 +1293,11 @@
     catch (e) { await plRecover(e); }
   }
 
+  const plQuitadas = {}; // completadas hace nada (ya fuera de la lista): para el nombre en la Auditoría
   async function plComplete(id) {
     const t = plTask(id);
     if (!t) return;
+    plQuitadas[id] = t;
     S.pl.tasks = S.pl.tasks.filter(x => x.id !== id);
     savePl();
     renderBoard();
@@ -1367,6 +1446,9 @@
   const ggTokenOk = () => !!S.gg.token && Date.now() < S.gg.exp - 60000;
 
   // consent: vuelve a mostrar la pantalla de permisos (si la vez anterior no se marcó el de contactos)
+  // Con la cuenta ya conocida, primero sin pantalla (prompt=none): si la sesión de Google sigue abierta
+  // en el navegador, va y vuelve sin pedir nada; si no, al volver se repite con la pantalla normal.
+  const GG_SILENCIOSO = 'mp.google.silencioso';
   function ggLogin(consent) {
     const state = uid();
     sessionStorage.setItem(GG_STATE, state);
@@ -1374,6 +1456,10 @@
     if (S.gg.account) q.set('login_hint', S.gg.account);
     if (consent === true) q.set('prompt', S.gg.account ? 'consent' : 'consent select_account');
     else if (!S.gg.account) q.set('prompt', 'select_account');
+    else if (Date.now() - (+sessionStorage.getItem(GG_SILENCIOSO) || 0) > 120000) {
+      sessionStorage.setItem(GG_SILENCIOSO, String(Date.now()));
+      q.set('prompt', 'none');
+    }
     location.assign('https://accounts.google.com/o/oauth2/v2/auth?' + q);
   }
 
@@ -1388,6 +1474,8 @@
     sessionStorage.removeItem(GG_STATE);
     history.replaceState(null, '', location.pathname + location.search);
     if (q.get('error')) {
+      // El intento sin pantalla no ha valido: con la pantalla normal (se conserva lo pendiente)
+      if (/^(interaction_required|login_required|consent_required|account_selection_required)$/.test(q.get('error')) && Date.now() - (+sessionStorage.getItem(GG_SILENCIOSO) || 0) < 120000) { ggLogin(); return; }
       toast(q.get('error') === 'access_denied' ? 'Has cancelado la conexión con Google.' : 'Google no permitió la conexión (' + q.get('error') + ').', 'error', null, 10000);
       return;
     }
@@ -1399,6 +1487,7 @@
     }
     S.gg.write = /auth\/contacts(\s|$)/.test(scope);
     S.gg.cal = /auth\/calendar\.events(\s|$)/.test(scope) && /calendar\.calendarlist/.test(scope);
+    sessionStorage.removeItem(GG_SILENCIOSO);
     S.gg.token = q.get('access_token');
     S.gg.exp = Date.now() + (parseInt(q.get('expires_in'), 10) || 3600) * 1000;
     saveGg();
@@ -1421,11 +1510,17 @@
     sessionStorage.removeItem(GG_NEXT);
     await syncContactos();
     applyView();
+    // Un evento que no se pudo guardar con el permiso caducado: se guarda ahora
+    if (next && next.calOp) await calEjecutarPendiente(next.calOp);
     calSync();
+    if (next && next.calAbrir !== undefined) {
+      if (S.ui.view !== 'calendario') showView('calendario');
+      openCalEvent(next.calAbrir);
+    }
     if (next && 'edit' in next) {
       if (!S.gg.write) { toast('Para editar hay que marcar el permiso de editar contactos en Google.', 'error', { label: 'Volver a pedir', fn: () => ggLogin(true) }, 15000); return; }
       if (S.ui.view !== 'contactos') showView('contactos');
-      openEditContacto(next.edit, next.draft || null);
+      openEditContacto(next.edit, next.draft || null, !!(next.guardar && next.draft));
     }
   }
 
@@ -1851,6 +1946,7 @@
     let res = null;
     try {
       const lista = await calReconcile();
+      S.calPendiente = false;
       const cambios = lista.length;
       res = finSync('calendario', opts, lista);
       const t = new Date(todayUtc());
@@ -1866,7 +1962,7 @@
     } catch (e) {
       res = finSync('calendario', opts, null, e.message || 'Error con Google Calendar.', e.kind);
       S.calState = 'error';
-      if (e.kind === 'login') { S.calState = 'idle'; pedirReconexion('Google', 'El permiso de Google ha caducado (dura una hora): reconecta para poner al día tu calendario.', ggLogin, { auto: !opts.manual }); }
+      if (e.kind === 'login') { S.calState = 'idle'; S.calPendiente = true; pedirReconexion('Google', 'El permiso de Google ha caducado (dura una hora): reconecta para poner al día tu calendario.', ggLogin, { auto: !opts.manual }); }
       else if (e.kind === 'scope') toast(e.message, 'error', { label: 'Dar permiso', fn: () => ggLogin(true) }, 15000);
       else toast(e.message || 'Error con Google Calendar.', 'error');
     } finally {
@@ -1877,14 +1973,14 @@
   }
 
   // ---- reconectar: ventana en el centro (no un aviso abajo que se pierde) ----
-  // Junta en una sola ventana los servicios que hay que reconectar. Las peticiones automáticas
-  // (por ejemplo, un cambio que no puede llegar al calendario) no se repiten antes de 10 minutos.
+  // Junta en una sola ventana los servicios que hay que reconectar. Solo se abre por algo que hace
+  // el usuario (Sincronizar, abrir una factura…): lo automático (sincronizaciones en segundo plano,
+  // subida de la Auditoría, puesta al día del calendario) nunca interrumpe, se queda pendiente y se
+  // ve solo en el aviso de la cabecera (decisión del usuario).
   const reconexiones = new Map(); // servicio -> { texto, fn }
-  const ultimaPeticion = {};
   let reconCerrar = null, reconPintar = null;
   function pedirReconexion(servicio, texto, fn, opts = {}) {
-    if (opts.auto && Date.now() - (ultimaPeticion[servicio] || 0) < 600000) return;
-    ultimaPeticion[servicio] = Date.now();
+    if (opts.auto) { renderSyncState(); return; }
     reconexiones.set(servicio, { texto, fn });
     if (reconPintar) { reconPintar(); return; }
     const body = h('div', { class: 'form' });
@@ -1901,7 +1997,8 @@
 
   // Tras un cambio en datos que afectan al calendario, se pone al día al poco (si el permiso sigue vigente)
   function calSchedule() {
-    if (calReady() && !ggTokenOk()) { pedirReconexion('Google', 'Tu cambio está guardado en Visir, pero no llegará a tu calendario de Google hasta que reconectes (el permiso dura una hora).', ggLogin, { auto: true }); return; }
+    // Sin permiso vigente se queda pendiente (aviso en la cabecera) y se pone al día al reconectar
+    if (calReady() && !ggTokenOk()) { S.calPendiente = true; renderSyncState(); return; }
     if (!calReady() || !ggTokenOk()) return;
     clearTimeout(calTimer);
     calTimer = setTimeout(() => calSync(), 2500);
@@ -1986,11 +2083,12 @@
     const warns = [];
     if (odConnected() && (S.odState === 'login' || S.odState === 'error')) warns.push(['OneDrive', S.odState, odConnect]);
     if (plConnected() && (S.plState === 'login' || S.plState === 'error')) warns.push(['Planner', S.plState, plConnect]);
-    if (ggConnected() && S.ggState === 'error') warns.push(['Google', 'error', ggRefresh]);
+    if (ggConnected() && (S.ggState === 'login' || (S.calPendiente && !ggTokenOk()))) warns.push(['Google', 'login', ggLogin]);
+    else if (ggConnected() && S.ggState === 'error') warns.push(['Google', 'error', ggRefresh]);
     if (calReady() && S.calState === 'error') warns.push(['Calendario', 'error', openSettings]);
     const w = document.getElementById('syncWarn');
     w.hidden = !warns.length;
-    w.replaceChildren(...warns.map(([name, st, fn]) => h('button', { type: 'button', class: 'warn-pill', onclick: st === 'login' ? fn : openSettings, title: st === 'login' ? 'Pulsa para volver a conectar' : 'Revisa la conexión en Ajustes' },
+    w.replaceChildren(...warns.map(([name, st, fn]) => h('button', { type: 'button', class: 'warn-pill', onclick: st === 'login' ? () => fn() : openSettings, title: st === 'login' ? 'Pulsa para volver a conectar' : 'Revisa la conexión en Ajustes' },
       name + (st === 'login' ? ': reconectar' : ': error'))));
     const btn = document.getElementById('syncBtn');
     btn.disabled = busy;
@@ -3611,10 +3709,28 @@
   // ---- eventos propios del usuario (sin la marca de la app: la puesta al día nunca los toca) ----
   const REPETIR = [['', 'No se repite'], ['RRULE:FREQ=WEEKLY', 'Cada semana'], ['RRULE:FREQ=MONTHLY', 'Cada mes'], ['RRULE:FREQ=YEARLY', 'Cada año']];
   const localTz = () => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || 'Europe/Madrid'; } catch (e) { return 'Europe/Madrid'; } };
+  // Ir a reconectar con Google y, al volver, seguir con "next" (abrir un evento o enviar un cambio apuntado)
+  function calIrAGoogle(next, que) {
+    sessionStorage.setItem(GG_NEXT, JSON.stringify(next));
+    toast('El permiso de Google ha caducado: reconectando para ' + que + '…');
+    setTimeout(() => ggLogin(), 600);
+  }
+  async function calEjecutarPendiente(op) {
+    try {
+      await ggCall(op.method, op.url, op.body);
+      audit('calendario', 'cambio', op.texto);
+      toast(op.msg);
+    } catch (e) {
+      audit('calendario', 'error', 'No se pudo guardar: ' + op.texto, { detalle: [e.message || ''] });
+      toast((e.message || 'Google Calendar no ha aceptado el cambio.') + ' (' + op.texto + ')', 'error', null, 12000);
+    }
+  }
   // Crear (ev = null) o editar un evento del calendario. Los repetidos se editan como serie.
   async function openCalEvent(ev) {
     if (!calReady()) { toast('Elige antes un calendario en Ajustes.', 'error'); return; }
-    if (!ggTokenOk()) { pedirReconexion('Google', 'El permiso de Google ha caducado (dura una hora): reconecta para crear o cambiar eventos.', ggLogin); return; }
+    // Para editar hay que leerlo de Google: con el permiso caducado se reconecta y al volver se abre.
+    // Uno nuevo se puede escribir ya: si al guardar sigue caducado, se guarda al volver de reconectar.
+    if (ev && !ggTokenOk()) { calIrAGoogle({ calAbrir: ev }, 'abrir el evento'); return; }
     const cid = encodeURIComponent(calCfg().calendarId);
     let src = null;
     if (ev) {
@@ -3715,8 +3831,10 @@
       try { await calFetch(S.cal.from || ymdOf(todayUtc()), S.cal.to || addDays(ymdOf(todayUtc()), 400)); await calFetchLista(); } catch (e) { /* se verá al sincronizar */ }
       if (S.ui.view === 'calendario') renderCal();
     };
+    // Permiso caducado: el cambio se apunta y se envía al volver de reconectar (no se pierde lo escrito)
+    const pendiente = op => { close(); calIrAGoogle({ calOp: op }, 'guardar el cambio'); };
     const fallo = e => {
-      if (e.kind === 'login') pedirReconexion('Google', 'El permiso de Google ha caducado y el evento no se ha guardado. Reconecta y vuelve a hacerlo.', ggLogin);
+      if (e.kind === 'login') toast('El permiso de Google ha caducado.', 'error', { label: 'Reconectar', fn: () => ggLogin() }, 10000);
       else if (e.kind === 'scope') toast(e.message, 'error', { label: 'Dar permiso', fn: () => ggLogin(true) }, 15000);
       else toast(e.message || 'Google Calendar no ha aceptado el cambio.', 'error', null, 10000);
     };
@@ -3748,16 +3866,20 @@
       if (src && todo.checked === allDay0) for (const k of ['start', 'end']) for (const x of Object.keys(body[k])) if (body[k][x] === null) delete body[k][x];
       // Sin repetición antes ni ahora: no se toca
       if (src && !recLines.length && !body.recurrence.length) delete body.recurrence;
+      if (!src) {
+        for (const k of ['start', 'end']) for (const x of Object.keys(body[k])) if (body[k][x] === null) delete body[k][x];
+        if (!body.recurrence.length) delete body.recurrence;
+      }
+      const op = src
+        ? { method: 'PATCH', url: CALAPI + 'calendars/' + cid + '/events/' + encodeURIComponent(src.id), body, texto: 'Evento modificado: «' + t + '»' + (serie ? ' (toda la serie)' : ''), msg: 'Evento guardado en Google Calendar' }
+        : { method: 'POST', url: CALAPI + 'calendars/' + cid + '/events', body, texto: 'Evento creado: «' + t + '»', msg: 'Evento creado en Google Calendar' };
+      if (!ggTokenOk()) { pendiente(op); return; }
       try {
-        if (src) await ggCall('PATCH', CALAPI + 'calendars/' + cid + '/events/' + encodeURIComponent(src.id), body);
-        else {
-          for (const k of ['start', 'end']) for (const x of Object.keys(body[k])) if (body[k][x] === null) delete body[k][x];
-          if (!body.recurrence.length) delete body.recurrence;
-          await ggCall('POST', CALAPI + 'calendars/' + cid + '/events', body);
-        }
-        audit('calendario', 'cambio', (src ? 'Evento modificado: «' : 'Evento creado: «') + t + '»' + (src && serie ? ' (toda la serie)' : ''));
-        await tras(src ? 'Evento guardado en Google Calendar' : 'Evento creado en Google Calendar');
+        await ggCall(op.method, op.url, op.body);
+        audit('calendario', 'cambio', op.texto);
+        await tras(op.msg);
       } catch (e) {
+        if (e.kind === 'login') { pendiente(op); return; }
         audit('calendario', 'error', 'No se pudo guardar el evento «' + t + '»', { detalle: [e.message || ''] });
         saveBtn.disabled = false;
         saveBtn.textContent = ev ? 'Guardar' : 'Crear evento';
@@ -3767,12 +3889,14 @@
     const borrar = async (id, pregunta, msg) => {
       if (!confirm(pregunta)) return;
       const nom = '«' + (src.summary || 'evento') + '»';
+      const op = { method: 'DELETE', url: CALAPI + 'calendars/' + cid + '/events/' + encodeURIComponent(id), texto: id === src.id ? (serie ? 'Serie borrada: ' : 'Evento borrado: ') + nom : 'Evento borrado solo el ' + (ev.start || '').slice(0, 10) + ': ' + nom, msg };
+      if (!ggTokenOk()) { pendiente(op); return; }
       try {
-        await ggCall('DELETE', CALAPI + 'calendars/' + cid + '/events/' + encodeURIComponent(id));
-        audit('calendario', 'cambio', id === src.id ? (serie ? 'Serie borrada: ' : 'Evento borrado: ') + nom : 'Evento borrado solo el ' + (ev.start || '').slice(0, 10) + ': ' + nom);
+        await ggCall(op.method, op.url);
+        audit('calendario', 'cambio', op.texto);
         await tras(msg);
       }
-      catch (e) { audit('calendario', 'error', 'No se pudo borrar ' + nom, { detalle: [e.message || ''] }); fallo(e); }
+      catch (e) { if (e.kind === 'login') { pendiente(op); return; } audit('calendario', 'error', 'No se pudo borrar ' + nom, { detalle: [e.message || ''] }); fallo(e); }
     };
     const serie = !!(ev && ev.serie);
     const fld = (label, ...els) => h('div', { class: 'field' }, h('span', { class: 'field-label' }, label), ...els);
@@ -4093,7 +4217,8 @@
   const TIPOS_MAIL = [['home', 'Personal'], ['work', 'Trabajo'], ['other', 'Otro']];
   const TIPOS_DIR = [['home', 'Casa'], ['work', 'Trabajo'], ['other', 'Otro']];
 
-  async function openEditContacto(id, draft) {
+  // guardar: al volver de reconectar, se guarda solo el borrador (lo escrito antes de que caducara el permiso)
+  async function openEditContacto(id, draft, guardar) {
     let cur = id ? (S.datos.colecciones.contactos || {})[id] : null;
     if (id && !cur) { toast('Ese contacto ya no está.', 'error'); return; }
     if (!ggEnsureWrite({ edit: id || null, draft: draft || null })) return;
@@ -4195,7 +4320,8 @@
         saveBtn.textContent = cur ? 'Guardar' : 'Crear contacto';
         if (e.kind === 'login' || e.kind === 'scope') {
           // Se guarda lo escrito y se vuelve aquí después de pasar por Google
-          sessionStorage.setItem(GG_NEXT, JSON.stringify({ edit: id || null, draft: f }));
+          sessionStorage.setItem(GG_NEXT, JSON.stringify({ edit: id || null, draft: f, guardar: e.kind === 'login' }));
+          if (e.kind === 'login') toast('El permiso de Google ha caducado: reconectando para guardar el contacto…');
           ggLogin(e.kind === 'scope');
           return;
         }
@@ -4243,6 +4369,7 @@
         h('button', { type: 'button', class: 'btn subtle small', onclick: () => close() }, 'Cancelar'),
         saveBtn));
     close = openModal(cur ? 'Editar contacto' : 'Nuevo contacto', body);
+    if (guardar) setTimeout(save, 0);
   }
 
   // ---------- santoral ----------
