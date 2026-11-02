@@ -2035,8 +2035,10 @@
   const tagUsage = tagId => Object.values(S.tags.assign).filter(arr => arr.includes(tagId)).length;
   const boardReady = () => isWork() ? !!(S.pl.tasks && S.pl.planId) : !!S.data;
 
+  // En el móvil no hay bandeja de etiquetas: tampoco filtro (por si quedó uno puesto con la pantalla ancha)
+  const sinBandeja = () => window.matchMedia('(max-width: 700px)').matches;
   function isVisible(item) {
-    if (!S.filter.size) return true;
+    if (!S.filter.size || sinBandeja()) return true;
     return assigned(item.id).some(id => S.filter.has(id));
   }
 
@@ -6243,6 +6245,12 @@
   }
 
   function start() {
+    // Versión publicada al pie del menú: el número anti-caché con que se ha cargado app.js
+    const vSrc = (document.querySelector('script[src^="app.js"]') || {}).src || '';
+    const vNum = (/[?&]v=(\d+)/.exec(vSrc) || [])[1];
+    document.getElementById('appVersion').textContent = vNum ? 'v' + vNum : '';
+    // Al pasar a ancho de móvil (o volver) con un filtro de etiquetas puesto, el tablero se repinta
+    try { window.matchMedia('(max-width: 700px)').addEventListener('change', () => { if (S.filter.size && (S.ui.view === 'personal' || S.ui.view === 'trabajo')) renderBoard(); }); } catch (e) { /* navegador antiguo */ }
     audSnap = snapDatos(); // foto inicial: desde aquí se registran los cambios
     recordarNombres();
     bind();

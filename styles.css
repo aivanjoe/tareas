@@ -72,7 +72,10 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
 .nav-item.disabled { opacity: 0.45; cursor: default; }
 .nav-label { font-size: 11.5px; line-height: 1.2; }
 .sidebar-spacer { flex: 1; }
-.hide-btn { align-self: center; flex: 0 0 auto; }
+.hide-btn { flex: 0 0 auto; }
+/* Pie del menú: ocultar y, al lado, la versión publicada en pequeño (para comprobar que ha llegado la actualización) */
+.sidebar-foot { display: flex; align-items: center; justify-content: center; gap: 8px; flex: 0 0 auto; }
+.app-version { font-size: 10.5px; font-weight: 700; letter-spacing: 0.04em; color: var(--faint); white-space: nowrap; }
 
 .main { flex: 1; min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
 
@@ -321,8 +324,8 @@ body.tag-dragging, body.tag-dragging * { cursor: grabbing !important; }
   .sync-info { display: none; }
   .actions .btn span { display: none; }
   .actions .btn { padding: 0 12px; }
-  .tagbar { margin: 0 16px 14px; }
-  .tagbar-label span { display: none; }
+  /* En el móvil no se arrastran etiquetas: la bandeja no sale (se cambian desde la tarea) */
+  .tagbar { display: none !important; }
   .board-wrap { padding: 0 16px calc(16px + env(safe-area-inset-bottom)); scroll-snap-type: x mandatory; }
   .column { flex: 0 0 calc(100vw - 48px); min-width: 0; max-width: none; width: calc(100vw - 48px); scroll-snap-align: start; }
 }
@@ -522,11 +525,18 @@ a.btn { text-decoration: none; }
 
 /* Ventanas bajas: barra lateral compacta para que no necesite desplazamiento */
 /* Menos alto: primero se juntan las opciones y el logo se queda grande; por debajo de 720 px, todo más apretado */
+@media (max-height: 980px) {
+  .sidebar { gap: 12px; }
+}
 @media (max-height: 900px) {
   .sidebar { gap: 12px; padding-top: calc(16px + env(safe-area-inset-top)); }
   .nav { gap: 1px; }
   .nav-item { padding: 6px 4px 5px; gap: 3px; }
   .nav-tools { padding-top: 8px; }
+}
+@media (max-height: 800px) {
+  .sidebar { gap: 8px; }
+  .nav-item { padding: 4px 4px 3px; gap: 2px; }
 }
 /* Pantallas bajas (600-720 px): un poco más apretado para que el menú quepa sin desplazamiento */
 @media (max-height: 720px) {
@@ -736,8 +746,11 @@ a.btn { text-decoration: none; }
 .heima-mark { width: 42px; height: 42px; border-radius: 11px; background: var(--accent); color: var(--bg); display: grid; place-items: center; }
 .nav-item .heima-mark svg { width: 34px; height: 34px; fill: none; stroke: currentColor; stroke-width: 6; stroke-linecap: square; stroke-linejoin: miter; }
 .heima-name { font-size: 10.5px; font-weight: 800; letter-spacing: 0.2em; padding-left: 0.2em; text-transform: uppercase; color: var(--accent); }
-@media (max-height: 900px) {
+@media (max-height: 980px) {
   .nav-item.heima-item { margin-top: 20px; }
+}
+@media (max-height: 800px) {
+  .nav-item.heima-item { margin-top: 10px; }
 }
 @media (max-height: 720px) {
   .nav-item.heima-item { margin-top: 10px; padding: 4px 5px 3px; border-radius: 15px; }
