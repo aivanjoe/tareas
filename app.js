@@ -3008,23 +3008,47 @@
   function renderHeima(forzar) {
     const root = document.getElementById('viewHeima');
     const url = heimaUrl();
-    const nota = (titulo, texto, botones) => root.replaceChildren(h('section', { class: 'panel heima-nota' },
-      h('h2', null, titulo), h('p', { class: 'muted' }, texto), h('div', { class: 'row-actions' }, ...botones)));
+    const nota = (titulo, texto, botones) => { root.replaceChildren(h('section', { class: 'panel heima-nota' },
+      h('h2', null, titulo), h('p', { class: 'muted' }, texto), h('div', { class: 'row-actions' }, ...botones))); pintarHeimaSecs(); };
     if (!url) return nota('Heima', 'Heima es tu parte privada, servida por el NAS de casa. Pon su dirección en Ajustes → Heima.', [h('button', { type: 'button', class: 'btn primary small', onclick: openSettings }, 'Ir a Ajustes')]);
     // Ya abierta con la misma dirección: no se recarga (Sincronizar y otros repintados no la tocan)
     const marco = root.querySelector('iframe.heima-marco');
     if (!forzar && marco && marco.dataset.url === url) return;
     if (!forzar && heimaEstado && heimaEstado.url === url && heimaEstado.ok === false && Date.now() - heimaEstado.ts < 15000) return;
     root.replaceChildren(h('section', { class: 'panel heima-nota' }, h('p', { class: 'muted' }, 'Buscando Heima en casa…')));
+    pintarHeimaSecs();
     heimaPing(url).then(ok => {
       heimaEstado = { url, ok, ts: Date.now() };
       if (S.ui.view !== 'heima') return;
       if (!ok) return nota('Heima solo está disponible en casa', 'No responde ' + url.replace(/^https:\/\//, '').replace(/\/$/, '') + '. Comprueba que estás en la red de casa y que el NAS está encendido. Si es la primera vez en este aparato, ábrelo aparte una vez: el navegador puede pedir permiso para acceder a la red local o avisar del certificado.', [
         h('button', { type: 'button', class: 'btn primary small', onclick: () => renderHeima(true) }, 'Reintentar'),
         h('button', { type: 'button', class: 'btn ghost small', onclick: () => window.open(url, '_blank', 'noopener') }, ICON.ext(), 'Abrir aparte')]);
-      root.replaceChildren(h('iframe', { class: 'heima-marco', src: url, title: 'Heima', dataset: { url }, referrerpolicy: 'no-referrer' }));
+      // La sección elegida va en la dirección (#finanzas): así abre directamente en ella
+      root.replaceChildren(h('iframe', { class: 'heima-marco', src: url + '#' + heimaSec(), title: 'Heima', dataset: { url }, referrerpolicy: 'no-referrer' }));
+      pintarHeimaSecs();
     });
   }
+  // Secciones de Heima (Red, Casa, Finanzas) en la cabecera de Visir, a la derecha del título (decisión del usuario):
+  // al pulsarlas se avisa al marco con postMessage (solo al origen de Heima); Heima, embebida, esconde sus pestañas.
+  const HEIMA_SECS = [
+    ['red', 'Red', () => svg([{ d: 'M2 9a15 15 0 0 1 20 0' }, { d: 'M5.5 12.5a10 10 0 0 1 13 0' }, { d: 'M9 16a5 5 0 0 1 6 0' }, { d: 'M12 19.5h.01' }])],
+    ['casa', 'Casa', () => svg([{ d: 'M3 11l9-7 9 7' }, { d: 'M5 10v10h14V10' }, { d: 'M10 20v-6h4v6' }])],
+    ['finanzas', 'Finanzas', () => svg([{ d: 'M4 4v16h16' }, { d: 'M8 14l3.5-4 3 3L20 6.5' }])]];
+  const heimaSec = () => HEIMA_SECS.some(x => x[0] === S.ui.heimaSec) ? S.ui.heimaSec : 'red';
+  function pintarHeimaSecs() {
+    const nav = document.getElementById('heimaSecs');
+    const marco = document.querySelector('#viewHeima iframe.heima-marco');
+    nav.hidden = S.ui.view !== 'heima' || !marco;
+    if (nav.hidden) return;
+    nav.replaceChildren(...HEIMA_SECS.map(([k, l, ic]) => h('button', {
+      type: 'button', class: 'heima-sec' + (k === heimaSec() ? ' active' : ''), 'aria-pressed': k === heimaSec() ? 'true' : 'false', title: l,
+      onclick: () => {
+        S.ui.heimaSec = k; saveUi(); pintarHeimaSecs();
+        try { marco.contentWindow.postMessage({ heima: 'seccion', s: k }, new URL(marco.dataset.url).origin); } catch (e) { /* marco aún sin cargar */ }
+      }
+    }, ic(), h('span', null, l))));
+  }
+
   function heimaSection() {
     const inp = h('input', { class: 'input', type: 'url', placeholder: HEIMA_EJEMPLO, 'aria-label': 'Dirección de Heima', autocomplete: 'off', inputmode: 'url' });
     inp.value = heimaUrl();
@@ -3172,6 +3196,7 @@
     document.getElementById('boardWrap').hidden = !board;
     for (const [k, c] of Object.entries(VIEWS)) if (c.el) document.getElementById(c.el).hidden = k !== v;
     if (cfg.render) cfg.render();
+    pintarHeimaSecs();
   }
 
   function showView(v) {

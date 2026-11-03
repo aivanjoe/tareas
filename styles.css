@@ -763,3 +763,15 @@ a.btn { text-decoration: none; }
   .heima-mark { width: 28px; height: 28px; border-radius: 8px; }
   .nav-item .heima-mark svg { width: 22px; height: 22px; }
 }
+
+/* Secciones de Heima en la cabecera, a la derecha del título (con iconos) */
+.heima-secs { display: inline-flex; gap: 4px; padding: 3px; margin-bottom: 2px; border-radius: 12px; background: rgba(255, 255, 255, 0.04); border: 1px solid var(--line); align-self: flex-end; }
+.heima-secs[hidden] { display: none; }
+.heima-sec { display: inline-flex; align-items: center; gap: 7px; height: 32px; padding: 0 12px; border: 0; border-radius: 9px; background: transparent; color: var(--muted); font: inherit; font-size: 13.5px; font-weight: 700; cursor: pointer; }
+.heima-sec svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.heima-sec:hover { color: var(--text); }
+.heima-sec.active { background: rgba(219, 242, 102, 0.14); color: var(--accent); }
+@media (max-width: 700px) {
+  .heima-sec span { display: none; }
+  .heima-sec { padding: 0 10px; }
+}
