@@ -775,3 +775,13 @@ a.btn { text-decoration: none; }
   .heima-sec span { display: none; }
   .heima-sec { padding: 0 10px; }
 }
+
+/* Prioridad de Planner (P1-P3): la tarjeta se tiñe de su color */
+.card.prio { background: color-mix(in srgb, var(--prio) 13%, var(--card)); border-color: color-mix(in srgb, var(--prio) 45%, transparent); }
+.card.prio::before { width: 4px; }
+.mini-prio { font-size: 10.5px; font-weight: 800; padding: 1px 7px; border-radius: 6px; background: var(--prio); color: #0B0F15; }
+.prio-seg { display: inline-flex; gap: 6px; flex-wrap: wrap; }
+.prio-op { min-width: 52px; height: 34px; padding: 0 12px; border-radius: 9px; border: 1px solid var(--line2); background: transparent; color: var(--muted); font: inherit; font-weight: 800; cursor: pointer; }
+.prio-op[style] { color: var(--c); border-color: color-mix(in srgb, var(--c) 45%, transparent); }
+.prio-op.on { background: rgba(255, 255, 255, 0.08); color: var(--text); border-color: var(--line2); }
+.prio-op.on[style] { background: var(--c); color: #0B0F15; border-color: var(--c); }

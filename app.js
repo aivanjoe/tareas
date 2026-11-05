@@ -318,6 +318,7 @@
       case 'etiquetas': return 'Etiqueta ' + q(r.name) + ' ' + verba;
       case 'asignaciones': return String(id).startsWith('tmp-') ? null : 'Etiquetas de la tarea ' + tarea(id) + ' cambiadas';
       case 'orden': return 'Orden de las etiquetas cambiado';
+      case 'prioridades': return 'Prioridad de la tarea ' + tarea(id) + ': ' + (kind === 'baja' ? 'quitada' : 'P' + r.p);
       case 'cumpledias': return kind === 'baja' ? 'Dejar de seguir en Cumples: ' + contacto(id) : kind === 'alta' ? 'Seguir en Cumples: ' + contacto(id) : null;
       case 'personas': return 'Persona ' + q(r.name) + ' ' + verba;
       case 'coloresContactos': return 'Color de la categoría ' + q((grupoMap()[id]) || id) + ' cambiado';
@@ -385,7 +386,7 @@
   // Nombres de tareas de Todoist vistos en esta sesión (para describir cambios de tareas que ya no están)
   const nombresTareas = new Map();
   function recordarNombres() { for (const i of (S.data && S.data.items) || []) nombresTareas.set(i.id, cleanTitle(i.content)); }
-  const tareaNombre = id => { const i = S.data && S.data.items.find(x => x.id === id); return i ? cleanTitle(i.content) : nombresTareas.get(id) || ''; };
+  const tareaNombre = id => { const i = S.data && S.data.items.find(x => x.id === id); if (i) return cleanTitle(i.content); const pt = (S.pl.tasks || []).find(x => x.id === id); return pt ? pt.title : nombresTareas.get(id) || ''; };
   const saveOd = () => store.set(KEYS.onedrive, S.od);
   const saveTags = () => {
     writeTags(S.datos, S.tags);
@@ -1191,6 +1192,17 @@
     cats: Object.keys(t.appliedCategories || {}).filter(k => t.appliedCategories[k]).sort((a, b) => +a.slice(8) - +b.slice(8)),
     hasDescription: !!t.hasDescription, etag: plEtag(t)
   });
+  // Prioridad P1 / P2 / P3 de las tareas de Trabajo: solo de Visir (decisión del usuario: no se escribe en Planner).
+  // Colección «prioridades» del almacén ({id: id de la tarea, p: 1-3}); colorea la tarjeta.
+  const PL_PRIO = [null, { n: 'P1', color: '#F0857A' }, { n: 'P2', color: '#F2B35B' }, { n: 'P3', color: '#7FA2E0' }];
+  const prioDe = id => { const r = (S.datos.colecciones.prioridades || {})[id]; return r && [1, 2, 3].includes(r.p) ? r.p : 0; };
+  function ponerPrio(id, n) {
+    if (prioDe(id) === n) return;
+    const col = Object.assign({}, S.datos.colecciones.prioridades);
+    if (n) col[id] = { id, p: n }; else delete col[id];
+    S.datos.colecciones.prioridades = col;
+    saveDatos();
+  }
   const normTitle = s => String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
 
   async function plSync(opts = {}) {
@@ -1339,6 +1351,7 @@
       for (const k of t.cats) if (!tagIds.includes(k)) applied[k] = false;
       for (const k of tagIds) if (!t.cats.includes(k)) applied[k] = true;
       if (Object.keys(applied).length) { body.appliedCategories = applied; t.cats = tagIds.slice(); }
+      ponerPrio(t.id, ed.prio);
       const notesChanged = ed.notesLoaded && ed.notes !== ed.notesOrig;
       if (notesChanged) t.hasDescription = !!ed.notes.trim();
       savePl();
@@ -1365,6 +1378,7 @@
     for (const k of tagIds) applied[k] = true;
     try {
       const created = await plCall('POST', '/planner/tasks', { planId: S.pl.planId, bucketId: col.key, title: name, orderHint: ' ' + (first ? first.orderHint : '') + '!', appliedCategories: applied });
+      if (ed.prio) ponerPrio(created.id, ed.prio);
       S.pl.tasks = S.pl.tasks.filter(x => x.id !== tmp.id);
       plReplace(plTaskFrom(created));
       renderBoard();
@@ -2176,10 +2190,11 @@
 
     const title = work ? item.title : cleanTitle(item.content);
     const notesLabel = work ? 'Tiene notas' : 'Tiene comentarios';
+    const prio = work ? PL_PRIO[prioDe(item.id)] : null;
     return h('div', {
-      class: 'card' + (pending ? ' pending' : '') + (hasNotes ? ' has-notes' : ''),
+      class: 'card' + (pending ? ' pending' : '') + (hasNotes ? ' has-notes' : '') + (prio ? ' prio' : ''),
       dataset: { taskId: item.id },
-      style: '--strip:' + (tags[0] ? tags[0].color : 'transparent')
+      style: '--strip:' + (prio ? prio.color : tags[0] ? tags[0].color : 'transparent') + (prio ? ';--prio:' + prio.color : '')
     },
       h('button', {
         type: 'button', class: 'check', 'aria-label': 'Completar tarea', disabled: pending,
@@ -2190,7 +2205,8 @@
         onclick: () => { if (!pending) openEdit(item.id); }
       }, title),
       hasNotes ? h('span', { class: 'card-notes' }, h('span', { title: notesLabel, 'aria-label': notesLabel }, ICON.comment())) : null,
-      tags.length ? h('span', { class: 'card-tags' },
+      tags.length || prio ? h('span', { class: 'card-tags' },
+        prio ? h('span', { class: 'mini-prio' }, prio.n) : null,
         tags.map(t => h('span', { class: 'mini-tag', style: '--c:' + t.color }, t.name))) : null
     );
   }
@@ -2331,7 +2347,7 @@
   // ---------- panel de tarea (nueva / editar) ----------
   function openNew(sectionKey, fromHeader) {
     if (!boardReady()) return;
-    S.editing = { mode: 'new', sectionKey, fromHeader, name: '', tagIds: [], work: isWork() };
+    S.editing = { mode: 'new', sectionKey, fromHeader, name: '', tagIds: [], work: isWork(), prio: 0 };
     renderDrawer();
   }
 
@@ -2339,7 +2355,7 @@
     const item = isWork() ? plTask(taskId) : S.data.items.find(i => i.id === taskId);
     if (!item) return;
     const name = isWork() ? item.title : item.content;
-    S.editing = { mode: 'edit', taskId, name, original: name, tagIds: assigned(taskId).slice(), work: isWork() };
+    S.editing = { mode: 'edit', taskId, name, original: name, tagIds: assigned(taskId).slice(), work: isWork(), prio: isWork() ? prioDe(taskId) : 0 };
     renderDrawer();
   }
 
@@ -2352,6 +2368,19 @@
   function columnName(key) {
     const col = columns().find(c => c.key === key);
     return col ? col.name : 'Sin sección';
+  }
+
+  // Prioridad (solo Trabajo): Sin / P1 / P2 / P3
+  function prioField(ed) {
+    const box = h('div', { class: 'prio-seg', role: 'group', 'aria-label': 'Prioridad' });
+    const pintar = () => box.replaceChildren(...[0, 1, 2, 3].map(n => h('button', {
+      type: 'button', class: 'prio-op' + (ed.prio === n ? ' on' : ''), 'aria-pressed': ed.prio === n ? 'true' : 'false',
+      style: n ? '--c:' + PL_PRIO[n].color : '',
+      onclick: () => { ed.prio = n; pintar(); }
+    }, n ? PL_PRIO[n].n : 'Sin')));
+    pintar();
+    return h('div', { class: 'field' }, h('span', { class: 'field-label' }, 'Prioridad'), box,
+      h('p', { class: 'hint' }, 'Solo en Visir (no cambia nada en Planner). Colorea la tarjeta.'));
   }
 
   function renderDrawer() {
@@ -2406,6 +2435,7 @@
         h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Cerrar', onclick: closeDrawer }, ICON.close())),
       h('div', { class: 'field' }, h('label', { class: 'field-label', for: 'taskName' }, 'Nombre'), nameInput),
       columnField,
+      isWork() ? prioField(ed) : null,
       h('div', { class: 'field' },
         h('span', { class: 'field-label' }, 'Etiquetas'),
         tagList().length ? chips : h('p', { class: 'hint' }, isWork() ? 'Este plan aún no tiene etiquetas.' : 'Todavía no has creado etiquetas.'),
