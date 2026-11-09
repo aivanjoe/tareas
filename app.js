@@ -1794,13 +1794,39 @@
     return (r.items || []).map(c => ({ id: c.id, nombre: c.summaryOverride || c.summary, color: c.backgroundColor, primary: !!c.primary }));
   }
 
-  // Regla de repetición de un gasto: meses de cobro y día (el 29-31 pasa al último día si el mes es más corto)
-  function gastoRRule(g) {
-    const meses = (Array.isArray(g.meses) && g.meses.length ? g.meses : mesesPara(g.periodicidad, 1)).slice().sort((a, b) => a - b).join(',');
-    const d = g.dia || 1;
-    if (d <= 28) return 'RRULE:FREQ=MONTHLY;BYMONTH=' + meses + ';BYMONTHDAY=' + d;
+  // Repetición de un gasto en el calendario. Solo reglas que entiende cualquier calendario (decisión tras ver que
+  // Outlook leía «FREQ=MONTHLY;BYMONTH=3» como «cada mes»): mensual, cada k meses (INTERVAL) o anual. Si los meses
+  // no van a intervalos regulares (p. ej. marzo y mayo), un evento anual por cada mes (`gastoEventos`).
+  // El 29-31 pasa al último día si el mes es más corto (el 31, «último día del mes»).
+  const gastoMeses = g => (Array.isArray(g.meses) && g.meses.length ? g.meses : mesesPara(g.periodicidad, 1)).slice().sort((a, b) => a - b);
+  function gastoDia(d) {
+    if (d <= 28) return 'BYMONTHDAY=' + d;
+    if (d >= 31) return 'BYMONTHDAY=-1';
     const dias = []; for (let i = 28; i <= d; i++) dias.push(i);
-    return 'RRULE:FREQ=MONTHLY;BYMONTH=' + meses + ';BYMONTHDAY=' + dias.join(',') + ';BYSETPOS=-1';
+    return 'BYMONTHDAY=' + dias.join(',') + ';BYSETPOS=-1';
+  }
+  function gastoIntervalo(meses) {
+    if (meses.length === 1) return 12;
+    const k = meses[1] - meses[0];
+    if (12 % k || meses.length !== 12 / k) return 0;
+    return meses.every((m, i) => !i || m - meses[i - 1] === k) ? k : 0;
+  }
+  function gastoRRule(g) {
+    const k = gastoIntervalo(gastoMeses(g));
+    if (k === 12) return 'RRULE:FREQ=YEARLY';
+    return 'RRULE:FREQ=MONTHLY' + (k > 1 ? ';INTERVAL=' + k : '') + ';' + gastoDia(g.dia || 1);
+  }
+  // Eventos de un gasto: uno con su repetición o, con meses irregulares, uno anual por mes («gasto:<id>:<mes>»)
+  function gastoEventos(g, year) {
+    const vs = vencimientos(g, year, year + 1);
+    if (!vs.length) return [];
+    if (gastoIntervalo(gastoMeses(g))) return [{ key: 'gasto:' + g.id, fecha: ymdOf(vs[0]), rrule: gastoRRule(g) }];
+    const out = [];
+    for (const m of gastoMeses(g)) {
+      const v = vs.find(t => new Date(t).getUTCMonth() + 1 === m);
+      if (v !== undefined) out.push({ key: 'gasto:' + g.id + ':' + String(m).padStart(2, '0'), fecha: ymdOf(v), rrule: 'RRULE:FREQ=YEARLY' });
+    }
+    return out;
   }
 
   // Nombre corto para el calendario: nombre de pila y primer apellido (o las dos primeras palabras)
@@ -1849,9 +1875,7 @@
     // Gastos marcados para el calendario (activos)
     for (const g of gastos()) {
       if (!g.calendario || g.activo === false) continue;
-      const first = vencimientos(g, year, year + 1)[0];
-      if (first === undefined) continue;
-      ev('gasto:' + g.id, g.concepto, ymdOf(first), { recurrence: [gastoRRule(g)], colorId: '5' });
+      for (const x of gastoEventos(g, year)) ev(x.key, g.concepto, x.fecha, { recurrence: [x.rrule], colorId: '5' });
     }
     return out;
   }
