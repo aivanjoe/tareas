@@ -3086,9 +3086,11 @@
   // al pulsarlas se avisa al marco con postMessage (solo al origen de Heima); Heima, embebida, esconde sus pestañas.
   const HEIMA_SECS = [
     ['red', 'Red', () => svg([{ d: 'M2 9a15 15 0 0 1 20 0' }, { d: 'M5.5 12.5a10 10 0 0 1 13 0' }, { d: 'M9 16a5 5 0 0 1 6 0' }, { d: 'M12 19.5h.01' }])],
-    ['casa', 'Casa', () => svg([{ d: 'M3 11l9-7 9 7' }, { d: 'M5 10v10h14V10' }, { d: 'M10 20v-6h4v6' }])],
+    ['nas', 'NAS', () => svg([{ d: 'M5 3h14v18H5z' }, { d: 'M5 9h14M5 15h14' }, { d: 'M9 6h.01M9 12h.01M9 18h.01' }])],
+    ['domotica', 'Domótica', () => svg([{ d: 'M3 11l9-7 9 7' }, { d: 'M5 10v10h14V10' }, { d: 'M10 20v-6h4v6' }])],
     ['finanzas', 'Finanzas', () => svg([{ d: 'M4 4v16h16' }, { d: 'M8 14l3.5-4 3 3L20 6.5' }])]];
-  const heimaSec = () => HEIMA_SECS.some(x => x[0] === S.ui.heimaSec) ? S.ui.heimaSec : 'red';
+  // «casa» (antes de partirla en NAS y Domótica) → NAS
+  const heimaSec = () => { const s = S.ui.heimaSec === 'casa' ? 'nas' : S.ui.heimaSec; return HEIMA_SECS.some(x => x[0] === s) ? s : 'red'; };
   function pintarHeimaSecs() {
     const nav = document.getElementById('heimaSecs');
     const marco = document.querySelector('#viewHeima iframe.heima-marco');
