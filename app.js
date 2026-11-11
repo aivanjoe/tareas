@@ -5904,6 +5904,44 @@
     }).catch(e => toast(e.message, 'error'));
   }
 
+  // kWh medidos por el Homey (vía Heima, solo en casa) en el periodo de cada factura de luz, para comprobarla.
+  // Se piden como mucho cada 10 minutos; fuera de casa no sale nada.
+  let homeyKwh = { url: '', ts: 0, datos: {}, pidiendo: false };
+  function pedirHomeyKwh(lista) {
+    const url = heimaUrl();
+    if (!url || homeyKwh.pidiendo) return;
+    const per = lista.filter(c => isYmd(c.inicio) && isYmd(c.fin) && c.inicio <= c.fin).map(c => c.inicio + '_' + c.fin).slice(0, 60);
+    if (!per.length) return;
+    if (homeyKwh.url === url && Date.now() - homeyKwh.ts < 10 * 60000 && per.every(p => p in homeyKwh.datos)) return;
+    homeyKwh.pidiendo = true;
+    const ctl = new AbortController();
+    const t = setTimeout(() => ctl.abort(), 5000);
+    fetch(url + 'api/domotica/kwh?p=' + per.join(','), { cache: 'no-store', signal: ctl.signal })
+      .then(r => r.ok ? r.json() : null).catch(() => null)
+      .then(j => {
+        clearTimeout(t);
+        const datos = {};
+        for (const p of per) datos[p] = j && j.periodos && j.periodos[p] && typeof j.periodos[p].kwh === 'number' ? j.periodos[p] : null;
+        const habia = homeyKwh.url === url && JSON.stringify(per.map(p => homeyKwh.datos[p] || null)) === JSON.stringify(per.map(p => datos[p]));
+        homeyKwh = { url, ts: Date.now(), datos, pidiendo: false };
+        if (!habia && S.ui.view === 'consumos' && cTipo === 'luz') renderConsumos();
+      });
+  }
+  function homeyChip(c) {
+    if (cTipo !== 'luz' || !isYmd(c.inicio) || !isYmd(c.fin)) return null;
+    const d = homeyKwh.url === heimaUrl() ? homeyKwh.datos[c.inicio + '_' + c.fin] : null;
+    if (!d) return null;
+    const completo = d.dias_con_datos >= d.dias;
+    let txt = 'Homey: ' + fmtCant(d.kwh, 'kWh') + (completo ? '' : ' (' + d.dias_con_datos + ' de ' + d.dias + ' días)');
+    let cls = 'homey-kwh';
+    if (completo && typeof c.kwh === 'number' && c.kwh > 0) {
+      const dif = (c.kwh - d.kwh) / d.kwh;
+      if (Math.abs(dif) >= 0.05) { cls += ' descuadre'; txt += ' · factura ' + (dif > 0 ? '+' : '') + Math.round(dif * 100) + ' %'; }
+      else { cls += ' cuadra'; txt += ' · cuadra'; }
+    }
+    return h('span', { class: cls, title: 'Lo que midió el Homey (contador general) en el periodo de la factura' }, txt);
+  }
+
   function renderConsumos() {
     const root = document.getElementById('viewConsumos');
     root.dataset.day = String(todayUtc());
@@ -5972,7 +6010,8 @@
       rows.append(h('div', { class: 'ev consumo' },
         h('div', { class: 'ev-main' },
           h('span', { class: 'ev-name' }, cap(MESES_LARGOS[c.mes - 1]) + ' ' + c.anio),
-          h('span', { class: 'ev-what' }, [periodo].concat(detalle).filter(Boolean).join(' · ') || '—')),
+          h('span', { class: 'ev-what' }, [periodo].concat(detalle).filter(Boolean).join(' · ') || '—'),
+          homeyChip(c)),
         h('span', { class: 'ev-amount' }, c.coste !== null && c.coste !== undefined ? fmtEur(c.coste) : '—'),
         h('div', { class: 'row-tools' },
           c.factura ? h('button', { type: 'button', class: 'icon-btn mini', 'aria-label': 'Ver factura', title: 'Ver factura', onclick: () => { if (!odConnected()) return toast('Conecta OneDrive para ver la factura.', 'error'); odOpenFile(c.factura); } }, ICON.file()) : null,
@@ -5990,6 +6029,7 @@
           }, ICON.trash()))));
     }
     if (!sorted.length) rows.append(h('p', { class: 'muted empty-note' }, 'Sube tus facturas en PDF o añade un consumo a mano.'));
+    if (cTipo === 'luz') pedirHomeyKwh(sorted);
 
     const toolbar = h('div', { class: 'g-toolbar' }, h('span'),
       h('div', { class: 'row-actions' },
