@@ -541,6 +541,7 @@
       section_id: i.section_id || null,
       parent_id: i.parent_id || null,
       child_order: i.child_order || 0,
+      added_at: i.added_at || '',
       recurring: !!(i.due && i.due.is_recurring),
       due: i.due && i.due.date ? { date: i.due.date, string: i.due.string || '' } : null
     }));
@@ -652,7 +653,7 @@
     }
     return res;
   }
-  const tdFirma = d => JSON.stringify([d.projects, d.sections, d.items.map(i => [i.id, i.content, i.section_id, i.project_id, i.child_order]), (d.notes || []).map(n => [n.id, n.content])]);
+  const tdFirma = d => JSON.stringify([d.projects, d.sections, d.items.map(i => [i.id, i.content, i.section_id, i.project_id, i.child_order, i.added_at]), (d.notes || []).map(n => [n.id, n.content])]);
 
   // ---- refresco automático de Todoist (decisión del usuario: la única fuente que se pone al día sola) ----
   // Cada minuto con la pestaña visible, al volver a ella y al abrir la app. No se lanza mientras arrastras,
@@ -2054,7 +2055,8 @@
     if (isWork()) return plColumns();
     const pid = currentProjectId();
     if (!pid) return [];
-    const byOrder = (a, b) => a.child_order - b.child_order;
+    // Personal: siempre la tarea más reciente arriba (por fecha de alta, como lo tiene puesto el usuario en Todoist)
+    const byOrder = (a, b) => (b.added_at || '').localeCompare(a.added_at || '') || a.child_order - b.child_order;
     const secs = S.data.sections.filter(s => s.project_id === pid).sort((a, b) => a.order - b.order);
     const items = S.data.items.filter(i => i.project_id === pid && !i.parent_id);
     const cols = [];
@@ -2191,6 +2193,7 @@
 
       S.sortables.push(Sortable.create(list, {
         group: 'tasks',
+        sort: isWork(), // en Personal el orden es por fecha: arrastrar solo cambia de columna
         animation: 160,
         forceFallback: true,
         fallbackClass: 'card-drag',
@@ -2253,17 +2256,7 @@
       commands.push({ type: 'item_move', uuid: uid(), args });
       item.section_id = toKey === 'none' ? null : toKey;
     }
-    // El orden solo se envía sin filtro activo (con filtro no se ven todas las tareas de la columna)
-    if (!S.filter.size) {
-      const order = [...evt.to.querySelectorAll('.card')]
-        .map((el, idx) => ({ id: el.dataset.taskId, child_order: idx + 1 }))
-        .filter(o => !o.id.startsWith('tmp-'));
-      if (order.length) commands.push({ type: 'item_reorder', uuid: uid(), args: { items: order } });
-      for (const o of order) {
-        const it = S.data.items.find(x => x.id === o.id);
-        if (it) it.child_order = o.child_order;
-      }
-    }
+    // Personal va por fecha de alta (la más reciente arriba): no se envía orden a Todoist
     saveCache();
     setTimeout(renderBoard, 0);
     if (!commands.length) return;
@@ -2628,7 +2621,7 @@
     const sectionId = ed.sectionKey === 'none' ? null : ed.sectionKey;
     // Las tareas nuevas van arriba del todo de su sección (decisión del usuario)
     const siblings = S.data.items.filter(i => i.project_id === pid && (i.section_id || null) === sectionId && !i.parent_id).sort((a, b) => a.child_order - b.child_order);
-    const item = { id: tempId, content: name, project_id: pid, section_id: sectionId, parent_id: null, child_order: 1, recurring: false, due: null };
+    const item = { id: tempId, content: name, project_id: pid, section_id: sectionId, parent_id: null, child_order: 1, added_at: new Date().toISOString(), recurring: false, due: null };
     siblings.forEach((i, k) => { i.child_order = k + 2; });
     S.data.items.push(item);
     S.tags.assign[tempId] = tagIds;
