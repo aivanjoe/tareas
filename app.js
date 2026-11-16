@@ -219,7 +219,7 @@
   // Pasados 90 días (o por encima de 5.000 entradas) se archiva en OneDrive, en logs/AAAA-MM.txt.
   const AUD_DIAS = 90, AUD_MAX = 5000;
   const AUD_FUENTES = { visir: ['Visir', '#DBF266'], todoist: ['Todoist', '#F2A65A'], planner: ['Planner', '#7FA2E0'], contactos: ['Contactos', '#6FC3E8'],
-    calendario: ['Calendario', '#8BD17C'], onedrive: ['OneDrive', '#5F7FC0'], google: ['Google', '#C9B6F2'] };
+    calendario: ['Calendario', '#8BD17C'], onedrive: ['OneDrive', '#5F7FC0'], google: ['Google', '#C9B6F2'], notas: ['Notas', '#F2C14E'] };
   // Nombre del dispositivo: el que ponga el usuario en Ajustes o, si no, sistema y navegador
   // (el navegador no deja leer el nombre del equipo)
   function dispAuto() {
@@ -798,10 +798,11 @@
   async function msLogin(servicio) {
     if (!msalApp) await loadMsal();
     clearStaleInteraction();
-    const pl = servicio === 'planner';
+    // Cuenta del trabajo: Planner y, con permisos aparte, las notas (OneDrive del trabajo) y sus reuniones (Outlook)
+    const pl = servicio !== 'onedrive';
     const acc = pl ? plAccount() : odAccount();
     const hint = pl ? S.pl.account : acc && acc.username;
-    const req = { scopes: pl ? PL_SCOPES : OD_SCOPES };
+    const req = { scopes: servicio === 'notas' ? NT_SCOPES : servicio === 'reuniones' ? NT_CAL_SCOPES : pl ? PL_SCOPES : OD_SCOPES };
     if (pl) { req.authority = ORG_AUTH; req.state = 'planner'; }
     if (hint) req.loginHint = hint;
     const sil = msSilencioso();
@@ -1066,6 +1067,7 @@
     toast(antes ? 'Planner reconectado' : 'Planner conectado');
     audit('planner', 'conexion', antes ? 'Planner reconectado' : 'Planner conectado');
     plReanudar().catch(() => null).then(() => plSync());
+    if (ntEnUso() || sessionStorage.getItem(NT_NEXT)) ntTrasLogin();
   }
 
   async function plDisconnect() {
@@ -2118,19 +2120,21 @@
   // Cabecera: cuándo se sincronizó la fuente de esta pantalla y, si alguna conexión necesita
   // atención (reconectar o error), un aviso que se puede pulsar
   function renderSyncState() {
-    const busy = S.syncing || S.odState === 'syncing' || S.plState === 'syncing' || S.ggState === 'syncing' || S.calState === 'syncing';
+    const busy = S.syncing || S.odState === 'syncing' || S.plState === 'syncing' || S.ggState === 'syncing' || S.calState === 'syncing' || S.ntState === 'syncing';
     const v = S.ui.view;
-    const ts = v === 'trabajo' ? S.pl.syncedAt : v === 'personal' || v === 'compra' ? (S.data && S.data.syncedAt) : v === 'contactos' ? S.gg.syncedAt : v === 'calendario' ? S.cal.syncedAt : S.od.syncedAt;
+    const ts = v === 'notas' ? S.nt.syncedAt : v === 'trabajo' ? S.pl.syncedAt : v === 'personal' || v === 'compra' ? (S.data && S.data.syncedAt) : v === 'contactos' ? S.gg.syncedAt : v === 'calendario' ? S.cal.syncedAt : S.od.syncedAt;
     document.getElementById('syncInfo').textContent = busy ? 'Sincronizando…' : ts ? 'Sincronizado ' + relTime(ts) : '';
     const warns = [];
     if (odConnected() && (S.odState === 'login' || S.odState === 'error')) warns.push(['OneDrive', S.odState, odConnect]);
     if (plConnected() && (S.plState === 'login' || S.plState === 'error')) warns.push(['Planner', S.plState, plConnect]);
+    if (plConnected() && (ntEnUso() || v === 'notas') && S.plState !== 'login' && (S.ntState === 'login' || S.ntState === 'permiso')) warns.push(['Notas', 'login', () => ntConectar('sync')]);
+    else if (plConnected() && ntEnUso() && S.ntState === 'error') warns.push(['Notas', 'error', () => ntSync({ manual: true })]);
     if (ggConnected() && (S.ggState === 'login' || (S.calPendiente && !ggTokenOk()))) warns.push(['Google', 'login', ggLogin]);
     else if (ggConnected() && S.ggState === 'error') warns.push(['Google', 'error', ggRefresh]);
     if (calReady() && S.calState === 'error') warns.push(['Calendario', 'error', openSettings]);
     const w = document.getElementById('syncWarn');
     w.hidden = !warns.length;
-    w.replaceChildren(...warns.map(([name, st, fn]) => h('button', { type: 'button', class: 'warn-pill', onclick: st === 'login' ? () => fn() : openSettings, title: st === 'login' ? 'Pulsa para volver a conectar' : 'Revisa la conexión en Ajustes' },
+    w.replaceChildren(...warns.map(([name, st, fn]) => h('button', { type: 'button', class: 'warn-pill', onclick: st === 'login' || name === 'Notas' ? () => fn() : openSettings, title: st === 'login' ? 'Pulsa para volver a conectar' : 'Revisa la conexión en Ajustes' },
       name + (st === 'login' ? ': reconectar' : ': error'))));
     const btn = document.getElementById('syncBtn');
     btn.disabled = busy;
@@ -3213,6 +3217,7 @@
   const VIEWS = {
     personal: { title: 'Personal', add: 'Añadir tarea', board: 'Todoist' },
     trabajo: { title: 'Trabajo', add: 'Añadir tarea', board: 'Planner' },
+    notas: { title: 'Notas', eyebrow: 'Reuniones', add: 'Nueva nota', el: 'viewNotas', render: () => renderNotas(), onAdd: () => ntNueva() },
     compra: { title: 'Compra', eyebrow: 'Lista de la compra', add: 'Añadir', el: 'viewCompra', render: () => renderCompra(), onAdd: () => { const i = document.getElementById('compraInput'); if (i) i.focus(); } },
     calendario: { title: 'Calendario', eyebrow: () => calCfg() ? calCfg().nombre : 'Google Calendar', add: 'Nuevo evento', el: 'viewCalendario', render: () => renderCal(), onAdd: () => openCalEvent(null) },
     contactos: { title: 'Contactos', eyebrow: 'Agenda y cumples', add: () => ctTab() === 'agenda' ? 'Nuevo contacto' : 'Elegir contactos', el: 'viewContactos', render: () => renderCumpledias(), onAdd: () => ctTab() === 'agenda' ? openEditContacto(null) : openCdPicker() },
@@ -6099,6 +6104,577 @@
     close = openModal(cur ? 'Editar consumo' : 'Añadir consumo', body);
   }
 
+  // ---------- pantalla Notas (notas de reuniones del trabajo) ----------
+  // Se guardan en el OneDrive del TRABAJO (carpeta de la app, notas/AAAA-MM.json, un fichero por mes), con la
+  // misma cuenta que Planner; nunca en el OneDrive personal. Copia local en «mp.notas» (todos los dispositivos).
+  // Nota: {id, creado, cambiado, fecha 'AAAA-MM-DD', hora 'HH:MM', fin, titulo, reunion: {id, organizador,
+  // asistentes: [...], lugar} | null, lineas: [{id, texto, tipo: 'nota'|'tarea'|'recordatorio', hecho?, plannerId?, planId?, pasada?}]}.
+  const NT_KEY = 'mp.notas';
+  const NT_SCOPES = ['Files.ReadWrite.AppFolder', 'Tasks.ReadWrite', 'User.Read'];
+  const NT_CAL_SCOPES = ['Calendars.Read', 'Tasks.ReadWrite', 'User.Read'];
+  const NT_DIR = GRAPH + '/me/drive/special/approot:/notas';
+  const NT_NEXT = 'mp.notas.next'; // qué hacer al volver del login (sessionStorage)
+  const NT_TIPOS = {
+    nota: { label: 'Nota', icon: () => svg([{ tag: 'circle', cx: '12', cy: '12', r: '2.6' }]) },
+    tarea: { label: 'Tarea', icon: () => svg([{ tag: 'rect', x: '4', y: '4', width: '16', height: '16', rx: '4' }, { d: 'M8.5 12.5l2.5 2.5 4.5-5' }]) },
+    recordatorio: { label: 'Recordatorio', icon: () => svg([{ d: 'M6 16V11a6 6 0 0 1 12 0v5l1.5 2h-15z' }, { d: 'M10 20.5a2 2 0 0 0 4 0' }]) }
+  };
+  const NT_ORDEN = ['nota', 'tarea', 'recordatorio'];
+  S.nt = Object.assign({ notas: {}, meses: {}, syncedAt: null }, store.get(NT_KEY, {}));
+  S.ntState = 'idle';
+  let ntAbierta = null;          // id de la nota abierta en el editor
+  let ntQ = '', ntFiltro = 'todas';
+  let ntTimer = null, ntOtra = false;
+  const saveNt = () => store.set(NT_KEY, { notas: S.nt.notas, meses: S.nt.meses, syncedAt: S.nt.syncedAt });
+  const ntNorm = s => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+  const ntMes = n => String(n.fecha || '').slice(0, 7);
+  const ntLista = () => Object.values(S.nt.notas).sort((a, b) => (b.fecha + (b.hora || '')).localeCompare(a.fecha + (a.hora || '')) || b.creado - a.creado);
+
+  class NtError extends Error { constructor(kind, message, status) { super(message); this.kind = kind; this.status = status; } }
+  async function ntToken(scopes) {
+    if (!msalApp) await loadMsal();
+    const acc = plAccount();
+    if (!acc) throw new NtError('login', 'Conecta tu cuenta del trabajo.');
+    try {
+      const r = await msalApp.acquireTokenSilent({ scopes, account: acc, authority: 'https://login.microsoftonline.com/' + (acc.tenantId || 'organizations') });
+      return r.accessToken;
+    } catch (e) {
+      const t = (e && [e.errorCode, e.subError, e.errorMessage, e.message].join(' ')) || '';
+      if (/consent_required|AADSTS65001/.test(t)) throw new NtError('permiso', 'Falta dar permiso a Visir.');
+      if (e instanceof msal.InteractionRequiredAuthError || /interaction_required|login_required|no_tokens_found|invalid_grant/.test(t)) throw new NtError('login', 'La sesión del trabajo ha caducado. Vuelve a conectar.');
+      throw new NtError('network', 'No se pudo conectar con Microsoft. Revisa la conexión.');
+    }
+  }
+  async function ntFetch(url, opts, scopes) {
+    const token = await ntToken(scopes || NT_SCOPES);
+    const o = Object.assign({}, opts);
+    o.headers = Object.assign({ Authorization: 'Bearer ' + token }, o.headers || {});
+    let r;
+    try { r = await fetch(url, o); } catch (e) { throw new NtError('network', 'No se pudo conectar con OneDrive del trabajo. Revisa la conexión.'); }
+    if (r.status === 401) throw new NtError('login', 'La sesión del trabajo ha caducado. Vuelve a conectar.');
+    if (r.status === 403) throw new NtError('permiso', 'Microsoft no deja a Visir hacer esto (403): falta el permiso o lo bloquea tu organización.', 403);
+    return r;
+  }
+  async function ntError(r, que) {
+    let m = '';
+    try { const j = await r.json(); m = j && j.error && j.error.message ? ': ' + j.error.message : ''; } catch (e) { /* sin cuerpo */ }
+    return new NtError('http', que + ' (' + r.status + ')' + m + '.', r.status);
+  }
+
+  // Conectar o dar permiso: login de la cuenta del trabajo pidiendo también el permiso de las notas
+  // (o el de las reuniones). Al volver lo recoge plLoggedIn y sigue ntTrasLogin.
+  function ntConectar(siguiente, reuniones) {
+    if (!S.od.clientId) { toast('Primero pon el Id. de aplicación de Microsoft en Ajustes → OneDrive.', 'error'); return; }
+    try { sessionStorage.setItem(NT_NEXT, JSON.stringify({ a: siguiente || 'sync', t: Date.now() })); } catch (e) { /* sin sessionStorage */ }
+    msLogin(reuniones ? 'reuniones' : 'notas').catch(e => toast('No se pudo conectar con Microsoft: ' + (e.errorMessage || e.message || e.errorCode), 'error', null, 10000));
+  }
+  function ntTrasLogin() {
+    let n = null;
+    try { n = JSON.parse(sessionStorage.getItem(NT_NEXT) || 'null'); sessionStorage.removeItem(NT_NEXT); } catch (e) { /* nada */ }
+    if (S.ntState === 'login' || S.ntState === 'permiso') S.ntState = 'idle';
+    ntSync();
+    if (n && Date.now() - n.t < 600000 && n.a === 'nueva') { S.ui.view = 'notas'; saveUi(); applyView(); setTimeout(ntNueva, 300); }
+  }
+
+  // ----- sincronización con el OneDrive del trabajo -----
+  function ntMerge(base, local, remote) {
+    const out = {};
+    for (const id of new Set([...Object.keys(base), ...Object.keys(local), ...Object.keys(remote)])) {
+      const sb = stable(base[id]), sl = stable(local[id]), sr = stable(remote[id]);
+      const pick = sl === sb ? remote[id] : local[id]; // solo cambió el otro lado → el suyo; si no, este dispositivo
+      if (pick !== undefined) out[id] = pick;
+    }
+    return out;
+  }
+  async function ntLeerMes(m) {
+    const r = await ntFetch(NT_DIR + '/' + m + '.json');
+    if (r.status === 404) return null;
+    if (!r.ok) throw await ntError(r, 'OneDrive del trabajo respondió con un error');
+    const meta = await r.json();
+    const url = meta['@microsoft.graph.downloadUrl'];
+    if (!url) throw new NtError('http', 'OneDrive del trabajo no devolvió el fichero de notas.');
+    let c;
+    try { c = await fetch(url); } catch (e) { throw new NtError('network', 'No se pudo descargar el fichero de notas.'); }
+    if (!c.ok) throw new NtError('http', 'No se pudo descargar el fichero de notas (' + c.status + ').');
+    let j;
+    try { j = await c.json(); } catch (e) { throw new NtError('format', 'El fichero de notas ' + m + ' está dañado.'); }
+    return { etag: meta.eTag, notas: (j && typeof j.notas === 'object' && j.notas) || {} };
+  }
+  async function ntEscribirMes(m, notas, etag) {
+    const headers = { 'Content-Type': 'application/json' };
+    if (etag) headers['If-Match'] = etag; else headers['If-None-Match'] = '*';
+    const body = JSON.stringify({ app: 'visir-notas', version: 1, mes: m, guardado: new Date().toISOString(), notas });
+    const r = await ntFetch(NT_DIR + '/' + m + '.json:/content', { method: 'PUT', headers, body });
+    if (r.status === 412 || r.status === 409) return { conflict: true };
+    if (!r.ok) throw await ntError(r, 'OneDrive del trabajo no aceptó las notas');
+    return { etag: (await r.json()).eTag };
+  }
+  async function ntListarMeses() {
+    const out = {};
+    let next = NT_DIR + ':/children?$select=name,eTag&$top=200';
+    while (next) {
+      const r = await ntFetch(next);
+      if (r.status === 404) return out; // la carpeta aún no existe
+      if (!r.ok) throw await ntError(r, 'No se pudo leer la carpeta de notas de OneDrive del trabajo');
+      const j = await r.json();
+      for (const f of j.value || []) { const m = /^(\d{4}-\d{2})\.json$/.exec(f.name || ''); if (m) out[m[1]] = f.eTag; }
+      next = j['@odata.nextLink'] || null;
+    }
+    return out;
+  }
+  async function ntSync(opts = {}) {
+    if (!plConnected()) return null;
+    if (S.ntState === 'syncing') { ntOtra = true; return null; }
+    clearTimeout(ntTimer);
+    S.ntState = 'syncing';
+    renderSyncState();
+    let res = null;
+    const detalle = [];
+    try {
+      const remotos = await ntListarMeses();
+      const meses = new Set([...Object.keys(remotos), ...Object.keys(S.nt.meses), ...Object.values(S.nt.notas).map(ntMes)].filter(Boolean));
+      for (const m of [...meses].sort()) {
+        for (let intento = 0; intento < 4; intento++) {
+          const reg = S.nt.meses[m] || { etag: null, base: {} };
+          const base = reg.base || {};
+          const local = {};
+          for (const n of Object.values(S.nt.notas)) if (ntMes(n) === m) local[n.id] = n;
+          let remoto = base, etag = reg.etag;
+          if ((remotos[m] || null) !== reg.etag) {
+            const leido = await ntLeerMes(m);
+            remoto = leido ? leido.notas : {};
+            etag = leido ? leido.etag : null;
+          }
+          const unido = ntMerge(base, local, remoto);
+          // Lo que llega de otro dispositivo (sin títulos: la Auditoría va al OneDrive personal)
+          for (const id of new Set([...Object.keys(remoto), ...Object.keys(base)])) {
+            if (stable(remoto[id]) === stable(base[id]) || stable(local[id]) !== stable(base[id])) continue;
+            detalle.push(!base[id] ? 'Nota nueva de otro dispositivo' : !remoto[id] ? 'Nota borrada en otro dispositivo' : 'Nota cambiada en otro dispositivo');
+          }
+          let nuevoEtag = etag;
+          if (stable(unido) !== stable(remoto)) {
+            if (!Object.keys(unido).length && !etag) { nuevoEtag = null; }
+            else {
+              const w = await ntEscribirMes(m, unido, etag);
+              if (w.conflict) { remotos[m] = '?'; continue; } // alguien escribió entretanto: se vuelve a leer y fusionar
+              nuevoEtag = w.etag;
+            }
+          }
+          for (const id of Object.keys(local)) delete S.nt.notas[id];
+          Object.assign(S.nt.notas, unido);
+          if (nuevoEtag || Object.keys(unido).length) S.nt.meses[m] = { etag: nuevoEtag, base: unido }; else delete S.nt.meses[m];
+          break;
+        }
+      }
+      S.nt.syncedAt = Date.now();
+      saveNt();
+      S.ntState = 'idle';
+      res = finSync('notas', opts, detalle);
+      if (opts.notify) toast('Notas sincronizadas');
+    } catch (e) {
+      S.ntState = e.kind === 'login' ? 'login' : e.kind === 'permiso' ? 'permiso' : 'error';
+      S.ntError = e.message;
+      res = finSync('notas', opts, null, e.message, e.kind === 'permiso' ? 'login' : e.kind);
+      if (e.kind === 'login') pedirReconexion('Notas', 'La sesión del trabajo ha caducado: reconecta para guardar tus notas en el OneDrive del trabajo (las de este dispositivo no se pierden).', () => ntConectar('sync'), { auto: !opts.manual });
+      else if (e.kind !== 'permiso' && opts.manual) toast(e.message, 'error', null, 10000);
+    } finally {
+      renderSyncState();
+      if (S.ui.view === 'notas') renderNotas();
+      if (ntOtra) { ntOtra = false; ntProgramar(); }
+    }
+    return res;
+  }
+  function ntProgramar() {
+    clearTimeout(ntTimer);
+    if (!plConnected() || S.ntState === 'login' || S.ntState === 'permiso') { renderSyncState(); return; }
+    ntTimer = setTimeout(() => ntSync(), 1500);
+  }
+  // Se guarda en el navegador al momento y se sube al OneDrive del trabajo al poco
+  function ntGuardar(n) {
+    n.cambiado = Date.now();
+    S.nt.notas[n.id] = n;
+    saveNt();
+    ntProgramar();
+  }
+  function ntBorrar(n) {
+    delete S.nt.notas[n.id];
+    saveNt();
+    audit('notas', 'cambio', 'Nota de reunión borrada');
+    ntProgramar();
+  }
+  const ntEnUso = () => !!(S.nt.syncedAt || Object.keys(S.nt.notas).length || Object.keys(S.nt.meses).length);
+  const ntVacia = n => !String(n.titulo || '').trim() && !n.reunion && !(n.lineas || []).some(l => String(l.texto || '').trim());
+
+  // ----- reuniones de hoy (Outlook del trabajo) -----
+  let ntReuniones = null; // { fecha, lista, error, kind }
+  async function ntLeerReuniones() {
+    const d0 = new Date(); d0.setHours(0, 0, 0, 0);
+    const d1 = new Date(d0); d1.setDate(d1.getDate() + 1);
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+    const url = GRAPH + '/me/calendarView?startDateTime=' + encodeURIComponent(d0.toISOString()) + '&endDateTime=' + encodeURIComponent(d1.toISOString()) +
+      '&$select=id,subject,start,end,organizer,attendees,location,isAllDay,isCancelled&$orderby=start/dateTime&$top=60';
+    const r = await ntFetch(url, { headers: { Prefer: 'outlook.timezone="' + tz + '"' } }, NT_CAL_SCOPES);
+    if (!r.ok) throw await ntError(r, 'No se pudieron leer tus reuniones');
+    const j = await r.json();
+    const hora = x => String((x && x.dateTime) || '').slice(11, 16);
+    return (j.value || []).filter(e => !e.isCancelled).map(e => {
+      const org = (e.organizer && e.organizer.emailAddress && e.organizer.emailAddress.name) || '';
+      return {
+        id: e.id, titulo: e.subject || '(Sin asunto)', todoElDia: !!e.isAllDay, hora: e.isAllDay ? '' : hora(e.start), fin: e.isAllDay ? '' : hora(e.end),
+        organizador: org, lugar: (e.location && e.location.displayName) || '',
+        asistentes: (e.attendees || []).map(a => (a.emailAddress && (a.emailAddress.name || a.emailAddress.address)) || '').filter(x => x && x !== org)
+      };
+    });
+  }
+
+  // ----- crear -----
+  function ntNueva() {
+    const hoy = localYmd(new Date());
+    const lista = h('div', { class: 'nt-reus' });
+    const crear = reu => {
+      close();
+      const ahora = new Date();
+      if (reu) {
+        const ya = Object.values(S.nt.notas).find(n => n.reunion && n.reunion.id === reu.id && n.fecha === hoy);
+        if (ya) { ntAbrir(ya.id); toast('Esa reunión ya tenía nota: la abro.'); return; }
+      }
+      const n = {
+        id: 'n' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), creado: Date.now(), cambiado: Date.now(),
+        fecha: hoy, hora: reu ? reu.hora : String(ahora.getHours()).padStart(2, '0') + ':' + String(ahora.getMinutes()).padStart(2, '0'), fin: reu ? reu.fin : '',
+        titulo: reu ? reu.titulo : '',
+        reunion: reu ? { id: reu.id, organizador: reu.organizador, asistentes: reu.asistentes.slice(0, 80), lugar: reu.lugar } : null,
+        lineas: [{ id: uid(), texto: '', tipo: 'nota' }]
+      };
+      S.nt.notas[n.id] = n;
+      saveNt();
+      audit('notas', 'cambio', 'Nota de reunión creada');
+      ntAbrir(n.id, reu ? 'linea' : 'titulo');
+    };
+    const pintar = () => {
+      const nodos = [];
+      if (!plConnected()) nodos.push(h('p', { class: 'muted' }, 'Conecta tu cuenta del trabajo (Ajustes → Planner) para ver aquí tus reuniones de hoy.'));
+      else if (!ntReuniones || ntReuniones.fecha !== hoy) nodos.push(h('p', { class: 'muted' }, 'Leyendo tus reuniones de hoy…'));
+      else if (ntReuniones.kind === 'permiso' || ntReuniones.kind === 'login') nodos.push(h('div', { class: 'nt-aviso' },
+        h('p', { class: 'muted' }, ntReuniones.kind === 'login' ? 'La sesión del trabajo ha caducado.' : 'Para ver tus reuniones de hoy, Visir necesita permiso para leer tu calendario del trabajo (Calendars.Read).'),
+        h('button', { type: 'button', class: 'btn primary small', onclick: () => { close(); ntConectar('nueva', ntReuniones.kind === 'permiso'); } }, ntReuniones.kind === 'login' ? 'Reconectar' : 'Dar permiso')));
+      else if (ntReuniones.error) nodos.push(h('p', { class: 'error' }, ntReuniones.error));
+      else if (!ntReuniones.lista.length) nodos.push(h('p', { class: 'muted' }, 'Hoy no tienes reuniones en el calendario del trabajo.'));
+      else for (const r of ntReuniones.lista) {
+        const ya = Object.values(S.nt.notas).some(n => n.reunion && n.reunion.id === r.id && n.fecha === hoy);
+        nodos.push(h('button', { type: 'button', class: 'nt-reu', onclick: () => crear(r) },
+          h('span', { class: 'nt-reu-hora' }, r.todoElDia ? 'Todo el día' : r.hora + (r.fin ? '–' + r.fin : '')),
+          h('span', { class: 'nt-reu-main' }, h('span', { class: 'nt-reu-tit' }, r.titulo),
+            h('span', { class: 'nt-reu-meta' }, [r.organizador, r.asistentes.length ? plural(r.asistentes.length, 'asistente') : '', ya ? 'ya tiene nota' : ''].filter(Boolean).join(' · ')))));
+      }
+      lista.replaceChildren(...nodos);
+    };
+    const body = h('div', { class: 'form' },
+      h('p', { class: 'hint' }, '¿Es una de tus reuniones de hoy? Toma de ella el título, la hora y los asistentes.'),
+      lista,
+      h('div', { class: 'row-actions modal-foot' }, h('span', { class: 'spacer' }),
+        h('button', { type: 'button', class: 'btn primary small', onclick: () => crear(null) }, ICON.plus(), 'Reunión aparte')));
+    const close = openModal('Nueva nota', body);
+    pintar();
+    if (plConnected() && (!ntReuniones || ntReuniones.fecha !== hoy || ntReuniones.error || Date.now() - ntReuniones.ts > 120000)) {
+      ntReuniones = null;
+      ntLeerReuniones().then(lista2 => { ntReuniones = { fecha: hoy, lista: lista2, ts: Date.now() }; })
+        .catch(e => { ntReuniones = { fecha: hoy, lista: [], error: e.message, kind: e.kind, ts: Date.now() }; })
+        .finally(() => { if (document.body.contains(lista)) pintar(); });
+    }
+  }
+
+  // ----- pasar a Planner (a la primera columna del plan, arriba del todo) -----
+  async function ntAPlanner(n, lineas) {
+    if (!plConnected()) { toast('Conecta tu cuenta del trabajo para pasar tareas a Planner.', 'error'); return; }
+    if (S.plState === 'login') { pedirReconexion('Planner', 'La sesión del trabajo ha caducado: reconecta y vuelve a pulsar «→ Planner».', plConnect); return; }
+    const col = plColumns()[0];
+    if (!col) { toast('No encuentro las columnas de Planner: pulsa Sincronizar.', 'error'); return; }
+    let ok = 0;
+    for (const l of lineas) {
+      const titulo = String(l.texto || '').trim().slice(0, 255);
+      if (!titulo || l.plannerId) continue;
+      const cols = plColumns()[0];
+      const first = cols ? cols.items.find(t => !String(t.id).startsWith('tmp-')) : null;
+      try {
+        // Sin cola de pendientes: si falla, la línea se queda sin pasar y se puede volver a pulsar (sin duplicados)
+        const created = await plCallRaw('POST', '/planner/tasks', { planId: S.pl.planId, bucketId: col.key, title: titulo, orderHint: ' ' + (first ? first.orderHint : '') + '!' });
+        audit('planner', 'cambio', describePl('POST', '/planner/tasks', { title: titulo }) + ' (desde una nota de reunión)');
+        plReplace(plTaskFrom(created));
+        l.plannerId = created.id; l.planId = S.pl.planId; l.pasada = Date.now();
+        ok++;
+      } catch (e) {
+        if (e.kind === 'login') { S.plState = 'login'; renderSyncState(); pedirReconexion('Planner', 'La sesión del trabajo ha caducado: reconecta y vuelve a pulsar «→ Planner».', plConnect); break; }
+        toast(e.message || 'Planner no aceptó la tarea.', 'error');
+        break;
+      }
+    }
+    if (ok) { ntGuardar(n); toast(ok === 1 ? 'Tarea creada en Planner (' + col.name + ')' : ok + ' tareas creadas en Planner (' + col.name + ')'); }
+    if (S.ui.view === 'notas') renderNotas(true);
+  }
+  // Estado en Planner de una línea pasada: pendiente, o hecha (ya no está entre las pendientes del plan)
+  function ntEstadoPlanner(l) {
+    if (!l.plannerId) return null;
+    if (plTask(l.plannerId)) return 'pendiente';
+    if (l.planId === S.pl.planId && S.pl.syncedAt && S.pl.syncedAt > (l.pasada || 0)) return 'hecha';
+    return 'pendiente';
+  }
+  function ntIrATarea(l) {
+    if (!plTask(l.plannerId)) { toast(ntEstadoPlanner(l) === 'hecha' ? 'Esa tarea ya está completada (o borrada) en Planner.' : 'No encuentro la tarea: pulsa Sincronizar.'); return; }
+    showView('trabajo');
+    setTimeout(() => openEdit(l.plannerId), 50);
+  }
+
+  // ----- pantalla -----
+  function ntAbrir(id, foco) {
+    ntAbierta = id;
+    if (S.ui.view !== 'notas') { S.ui.view = 'notas'; saveUi(); applyView(); }
+    renderNotas(true, foco);
+  }
+  function ntCerrar() {
+    const n = S.nt.notas[ntAbierta];
+    if (n && ntVacia(n)) { delete S.nt.notas[n.id]; saveNt(); ntProgramar(); }
+    ntAbierta = null;
+    renderNotas(true);
+  }
+  function renderNotas(forzar, foco) {
+    const root = document.getElementById('viewNotas');
+    root.dataset.day = String(todayUtc());
+    // Escribiendo en una nota: no se rehace el editor (perdería el foco); solo el estado
+    if (!forzar && ntAbierta && root.contains(document.activeElement) && /^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName)) {
+      const st = root.querySelector('.nt-estado');
+      if (st) st.replaceWith(ntEstadoLinea());
+      return;
+    }
+    if (ntAbierta && !S.nt.notas[ntAbierta]) ntAbierta = null;
+    // Al abrir la pantalla se ponen al día las notas si hace más de 2 minutos (decisión del usuario: verlas en todos sus dispositivos)
+    if (!forzar && plConnected() && S.ntState === 'idle' && (!S.nt.syncedAt || Date.now() - S.nt.syncedAt > 120000)) setTimeout(() => ntSync(), 0);
+    if (ntAbierta) return ntEditor(root, S.nt.notas[ntAbierta], foco);
+    ntListado(root);
+  }
+  function ntEstadoLinea() {
+    let txt, cls = 'hint nt-estado';
+    if (!plConnected()) { txt = 'Sin cuenta del trabajo conectada: las notas se quedan en este navegador hasta que la conectes en Ajustes → Planner.'; cls += ' warn'; }
+    else if (S.ntState === 'syncing') txt = 'Guardando en tu OneDrive del trabajo…';
+    else if (S.ntState === 'permiso') { txt = 'Falta dar permiso a Visir para guardar las notas en tu OneDrive del trabajo. Mientras, se quedan en este navegador.'; cls += ' warn'; }
+    else if (S.ntState === 'login') { txt = 'La sesión del trabajo ha caducado: las notas se quedan en este navegador hasta que reconectes.'; cls += ' warn'; }
+    else if (S.ntState === 'error') { txt = 'No se pudo guardar en OneDrive del trabajo: ' + (S.ntError || 'error') + ' Se reintenta en el próximo cambio o al sincronizar.'; cls += ' warn'; }
+    else txt = S.nt.syncedAt ? 'Guardadas en tu OneDrive del trabajo · sincronizadas ' + relTime(S.nt.syncedAt) + '.' : 'Se guardarán en tu OneDrive del trabajo.';
+    const p = h('p', { class: cls }, txt);
+    if (S.ntState === 'permiso' || S.ntState === 'login') p.append(' ', h('button', { type: 'button', class: 'btn subtle small', onclick: () => ntConectar('sync') }, S.ntState === 'permiso' ? 'Dar permiso' : 'Reconectar'));
+    return p;
+  }
+  const ntDiaTxt = ymd => {
+    const t0 = localYmd(new Date());
+    const ay = new Date(); ay.setDate(ay.getDate() - 1);
+    if (ymd === t0) return 'Hoy';
+    if (ymd === localYmd(ay)) return 'Ayer';
+    const [y, m, d] = ymd.split('-').map(Number);
+    const x = new Date(y, m - 1, d);
+    return cap(x.toLocaleDateString('es-ES', { weekday: 'long', day: 'numeric', month: 'long', year: y === new Date().getFullYear() ? undefined : 'numeric' }));
+  };
+  // Texto con las palabras buscadas resaltadas (sin tildes ni mayúsculas; sin innerHTML)
+  function ntResaltar(texto, q) {
+    const palabras = ntNorm(q).split(/\s+/).filter(Boolean);
+    if (!palabras.length) return [texto];
+    let norm = '';
+    const idx = [];
+    for (let i = 0; i < texto.length; i++) { const c = ntNorm(texto[i]); for (let k = 0; k < c.length; k++) { norm += c[k]; idx.push(i); } }
+    const marcas = new Array(texto.length).fill(false);
+    for (const w of palabras) {
+      let p = norm.indexOf(w);
+      while (p >= 0) { for (let k = p; k < p + w.length; k++) marcas[idx[k]] = true; p = norm.indexOf(w, p + w.length); }
+    }
+    const out = [];
+    let i = 0;
+    while (i < texto.length) {
+      let j = i;
+      while (j < texto.length && marcas[j] === marcas[i]) j++;
+      out.push(marcas[i] ? h('mark', null, texto.slice(i, j)) : texto.slice(i, j));
+      i = j;
+    }
+    return out;
+  }
+  function ntResumen(n) {
+    const ls = (n.lineas || []).filter(l => String(l.texto || '').trim());
+    const tareas = ls.filter(l => l.tipo === 'tarea'), pasadas = tareas.filter(l => l.plannerId);
+    const recs = ls.filter(l => l.tipo === 'recordatorio'), abiertos = recs.filter(l => !l.hecho);
+    const out = [];
+    out.push(h('span', { class: 'nt-chip' }, plural(ls.length, 'línea')));
+    if (tareas.length) out.push(h('span', { class: 'nt-chip tarea' + (pasadas.length < tareas.length ? ' pend' : '') }, plural(tareas.length, 'tarea') + (pasadas.length ? ' · ' + pasadas.length + ' en Planner' : '')));
+    if (recs.length) out.push(h('span', { class: 'nt-chip rec' + (abiertos.length ? ' pend' : '') }, abiertos.length ? plural(abiertos.length, 'recordatorio abierto', 'recordatorios abiertos') : plural(recs.length, 'recordatorio hecho', 'recordatorios hechos')));
+    return out;
+  }
+  function ntListado(root) {
+    const todas = ntLista();
+    const seg = h('div', { class: 'seg', role: 'group', 'aria-label': 'Filtro' },
+      [['todas', 'Todas'], ['tareas', 'Tareas sin pasar'], ['recordatorios', 'Recordatorios abiertos']].map(([k, l]) =>
+        h('button', { type: 'button', class: ntFiltro === k ? 'on' : '', 'aria-pressed': ntFiltro === k ? 'true' : 'false', onclick: () => { ntFiltro = k; renderNotas(true); } }, l)));
+    const buscar = campoBuscar(ntQ, v => { ntQ = v; }, () => renderNotas(true), 'nt-buscar', 'Buscar en las notas');
+    const textoNota = n => [n.titulo, n.reunion && n.reunion.organizador, n.reunion && (n.reunion.asistentes || []).join(' '), n.reunion && n.reunion.lugar].filter(Boolean).join(' ');
+    const lista = todas.filter(n => {
+      const ls = n.lineas || [];
+      if (ntFiltro === 'tareas' && !ls.some(l => l.tipo === 'tarea' && !l.plannerId && String(l.texto || '').trim())) return false;
+      if (ntFiltro === 'recordatorios' && !ls.some(l => l.tipo === 'recordatorio' && !l.hecho && String(l.texto || '').trim())) return false;
+      return coincide(ntQ, textoNota(n), ls.map(l => l.texto).join(' '));
+    });
+    const nodos = [];
+    let dia = null;
+    for (const n of lista) {
+      if (n.fecha !== dia) { dia = n.fecha; nodos.push(h('h3', { class: 'aud-day' }, ntDiaTxt(n.fecha))); }
+      const meta = [n.reunion && n.reunion.organizador, n.reunion && (n.reunion.asistentes || []).length ? plural(n.reunion.asistentes.length, 'asistente') : '', n.reunion ? '' : 'Reunión aparte'].filter(Boolean).join(' · ');
+      // Con búsqueda: las líneas que coinciden (o las tareas / recordatorios del filtro)
+      let lineas = [];
+      if (ntQ.trim()) lineas = (n.lineas || []).filter(l => String(l.texto || '').trim() && coincide(ntQ, l.texto));
+      else if (ntFiltro === 'tareas') lineas = (n.lineas || []).filter(l => l.tipo === 'tarea' && !l.plannerId && String(l.texto || '').trim());
+      else if (ntFiltro === 'recordatorios') lineas = (n.lineas || []).filter(l => l.tipo === 'recordatorio' && !l.hecho && String(l.texto || '').trim());
+      nodos.push(h('button', { type: 'button', class: 'nt-item', onclick: () => ntAbrir(n.id) },
+        h('span', { class: 'nt-hora' }, n.hora || ''),
+        h('span', { class: 'nt-main' },
+          h('span', { class: 'nt-tit' }, ...ntResaltar(n.titulo || 'Sin título', ntQ)),
+          meta ? h('span', { class: 'nt-meta' }, ...ntResaltar(meta, ntQ)) : null,
+          h('span', { class: 'nt-chips' }, ntResumen(n)),
+          lineas.length ? h('span', { class: 'nt-coinc' }, lineas.slice(0, 4).map(l => h('span', { class: 'nt-coinc-l t-' + l.tipo }, NT_TIPOS[l.tipo] ? NT_TIPOS[l.tipo].icon() : null, h('span', null, ...ntResaltar(l.texto, ntQ))))) : null)));
+    }
+    if (!lista.length) nodos.push(h('p', { class: 'muted empty-note' }, todas.length ? 'Nada coincide con la búsqueda o el filtro.' : 'Aún no tienes notas. Pulsa «Nueva nota» al empezar una reunión: Visir te ofrece tus reuniones de hoy para tomar sus datos.'));
+    root.replaceChildren(
+      h('section', { class: 'panel' },
+        h('div', { class: 'g-toolbar' }, buscar, seg),
+        h('div', { class: 'aud-list' }, nodos),
+        ntEstadoLinea()));
+  }
+
+  // Editor: cabecera (título, fecha, hora, reunión) y líneas sueltas. Intro crea una línea; cada línea es nota, tarea o recordatorio.
+  function ntEditor(root, n, foco) {
+    const guardar = () => ntGuardar(n);
+    const titulo = h('input', { class: 'input nt-titulo', type: 'text', value: n.titulo || '', placeholder: 'Título de la reunión', 'aria-label': 'Título', maxlength: '200' });
+    titulo.addEventListener('input', () => { n.titulo = titulo.value; guardar(); });
+    titulo.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); enfocar(n.lineas[0] && n.lineas[0].id, 0); } });
+    const fecha = h('input', { class: 'input nt-fecha', type: 'date', value: n.fecha, 'aria-label': 'Fecha' });
+    fecha.addEventListener('change', () => { if (/^\d{4}-\d{2}-\d{2}$/.test(fecha.value)) { n.fecha = fecha.value; guardar(); } });
+    const hora = h('input', { class: 'input nt-horain', type: 'time', value: n.hora || '', 'aria-label': 'Hora' });
+    hora.addEventListener('change', () => { n.hora = hora.value; guardar(); });
+    const r = n.reunion;
+    let verAsis = false;
+    const asis = h('div', { class: 'nt-asis' });
+    const pintarAsis = () => {
+      const a = (r && r.asistentes) || [];
+      asis.replaceChildren(...[
+        r && r.organizador ? h('span', { class: 'nt-org' }, 'Organiza ', h('strong', null, r.organizador)) : null,
+        r && r.lugar ? h('span', { class: 'nt-org' }, r.lugar) : null,
+        a.length ? h('button', { type: 'button', class: 'btn subtle small', 'aria-expanded': verAsis ? 'true' : 'false', onclick: () => { verAsis = !verAsis; pintarAsis(); } }, verAsis ? 'Ocultar asistentes' : plural(a.length, 'asistente')) : null,
+        verAsis ? h('div', { class: 'nt-asis-lista' }, a.map(x => h('span', { class: 'nt-chip' }, x))) : null].filter(Boolean));
+    };
+    pintarAsis();
+
+    const lineasBox = h('div', { class: 'nt-lineas' });
+    const tareasSin = () => n.lineas.filter(l => l.tipo === 'tarea' && !l.plannerId && String(l.texto || '').trim());
+    const pie = h('div', { class: 'nt-pie' });
+    const pintarPie = () => {
+      const sin = tareasSin();
+      pie.replaceChildren(...[
+        h('button', { type: 'button', class: 'btn ghost small', onclick: () => { n.lineas.push({ id: uid(), texto: '', tipo: 'nota' }); guardar(); pintar(n.lineas[n.lineas.length - 1].id, 0); } }, ICON.plus(), 'Línea'),
+        sin.length > 1 ? h('button', { type: 'button', class: 'btn primary small', onclick: () => ntAPlanner(n, sin) }, 'Pasar ' + sin.length + ' tareas a Planner') : null,
+        h('span', { class: 'hint' }, 'Intro: línea nueva · empieza por «[]» para tarea o por «!» para recordatorio')].filter(Boolean));
+    };
+    const autoalto = ta => { ta.style.height = 'auto'; ta.style.height = ta.scrollHeight + 'px'; };
+    function enfocar(id, pos) {
+      const ta = lineasBox.querySelector('textarea[data-id="' + id + '"]');
+      if (!ta) return;
+      ta.focus();
+      const p = pos === undefined || pos === null ? ta.value.length : Math.min(pos, ta.value.length);
+      try { ta.setSelectionRange(p, p); } catch (e) { /* nada */ }
+    }
+    function pintar(focoId, pos) {
+      lineasBox.replaceChildren(...n.lineas.map((l, i) => {
+        const t = NT_TIPOS[l.tipo] || NT_TIPOS.nota;
+        const ta = h('textarea', { class: 'nt-texto', rows: '1', dataset: { id: l.id }, placeholder: i === 0 && n.lineas.length === 1 ? 'Escribe aquí…' : '', 'aria-label': t.label });
+        ta.value = l.texto || '';
+        ta.addEventListener('input', () => {
+          // Atajos al principio de la línea: «[]» tarea, «!» recordatorio
+          const m = /^(\[\s?\]|!)\s/.exec(ta.value);
+          if (m) { l.tipo = m[1] === '!' ? 'recordatorio' : 'tarea'; l.texto = ta.value.slice(m[0].length); guardar(); pintar(l.id, 0); return; }
+          l.texto = ta.value; autoalto(ta); guardar(); pintarPie();
+        });
+        ta.addEventListener('paste', e => {
+          const txt = (e.clipboardData && e.clipboardData.getData('text/plain')) || '';
+          if (!/\n/.test(txt)) return;
+          e.preventDefault();
+          const partes = txt.replace(/\r/g, '').split('\n');
+          const a = ta.selectionStart, b = ta.selectionEnd, resto = ta.value.slice(b);
+          l.texto = ta.value.slice(0, a) + partes[0];
+          const nuevas = partes.slice(1).map(p => ({ id: uid(), texto: p, tipo: 'nota' }));
+          nuevas[nuevas.length - 1].texto += resto;
+          n.lineas.splice(i + 1, 0, ...nuevas);
+          guardar();
+          pintar(nuevas[nuevas.length - 1].id, nuevas[nuevas.length - 1].texto.length - resto.length);
+        });
+        ta.addEventListener('keydown', e => {
+          if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+            e.preventDefault();
+            const a = ta.selectionStart;
+            const nueva = { id: uid(), texto: ta.value.slice(ta.selectionEnd), tipo: 'nota' };
+            l.texto = ta.value.slice(0, a);
+            n.lineas.splice(i + 1, 0, nueva);
+            guardar();
+            pintar(nueva.id, 0);
+          } else if (e.key === 'Backspace' && ta.selectionStart === 0 && ta.selectionEnd === 0 && i > 0 && !l.plannerId) {
+            // Al principio de la línea: se junta con la anterior
+            e.preventDefault();
+            const prev = n.lineas[i - 1];
+            const pos2 = (prev.texto || '').length;
+            prev.texto = (prev.texto || '') + (l.texto || '');
+            n.lineas.splice(i, 1);
+            guardar();
+            pintar(prev.id, pos2);
+          } else if (e.key === 'ArrowUp' && ta.selectionStart === 0 && i > 0) { e.preventDefault(); enfocar(n.lineas[i - 1].id); }
+          else if (e.key === 'ArrowDown' && ta.selectionStart === ta.value.length && i < n.lineas.length - 1) { e.preventDefault(); enfocar(n.lineas[i + 1].id, 0); }
+        });
+        // Marcador: nota → tarea → recordatorio (una tarea ya pasada a Planner no cambia)
+        const tipoBtn = h('button', { type: 'button', class: 'nt-tipo t-' + l.tipo, title: t.label + (l.plannerId ? '' : ' · pulsa para cambiar'), 'aria-label': t.label + (l.plannerId ? '' : ': cambiar'), disabled: !!l.plannerId,
+          onclick: () => { l.tipo = NT_ORDEN[(NT_ORDEN.indexOf(l.tipo) + 1) % NT_ORDEN.length]; if (l.tipo !== 'recordatorio') delete l.hecho; guardar(); pintar(l.id); } }, t.icon());
+        let accion = null;
+        if (l.tipo === 'tarea') {
+          const st = ntEstadoPlanner(l);
+          accion = st ? h('button', { type: 'button', class: 'nt-pl ' + st, title: st === 'hecha' ? 'Completada en Planner' : 'Abrir en Trabajo', onclick: () => ntIrATarea(l) }, st === 'hecha' ? ICON.check() : null, st === 'hecha' ? 'Hecha' : 'En Planner')
+            : h('button', { type: 'button', class: 'btn subtle small nt-apl', disabled: !String(l.texto || '').trim(), title: 'Crear en Planner, en la primera columna', onclick: () => ntAPlanner(n, [l]) }, '→ Planner');
+        } else if (l.tipo === 'recordatorio') {
+          accion = h('button', { type: 'button', class: 'nt-hecho' + (l.hecho ? ' on' : ''), 'aria-pressed': l.hecho ? 'true' : 'false', title: l.hecho ? 'Hecho: pulsa para reabrir' : 'Marcar como hecho',
+            onclick: () => { l.hecho = !l.hecho; guardar(); pintar(l.id); } }, ICON.check());
+        }
+        const quitar = h('button', { type: 'button', class: 'icon-btn mini nt-quitar', 'aria-label': 'Quitar línea', title: 'Quitar línea',
+          onclick: () => { n.lineas.splice(i, 1); if (!n.lineas.length) n.lineas.push({ id: uid(), texto: '', tipo: 'nota' }); guardar(); pintar(); pintarPie(); } }, ICON.close());
+        return h('div', { class: 'nt-linea t-' + l.tipo + (l.hecho ? ' hecho' : '') }, tipoBtn, ta, accion, quitar);
+      }));
+      lineasBox.querySelectorAll('textarea').forEach(autoalto);
+      pintarPie();
+      if (focoId) enfocar(focoId, pos);
+    }
+
+    const borrar = h('button', { type: 'button', class: 'btn danger small', onclick: () => {
+      if (!ntVacia(n) && !confirm('¿Borrar esta nota? Se borra también de tu OneDrive del trabajo (las tareas pasadas a Planner se quedan).')) return;
+      ntBorrar(n); ntAbierta = null; renderNotas(true);
+    } }, ICON.trash(), 'Borrar');
+    root.replaceChildren(
+      h('div', { class: 'nt-bar' },
+        h('button', { type: 'button', class: 'btn ghost small', onclick: ntCerrar }, ICON.left(), 'Notas'),
+        h('span', { class: 'spacer' }), borrar),
+      h('section', { class: 'panel nt-editor' },
+        titulo,
+        h('div', { class: 'nt-cab' }, fecha, hora, r ? h('span', { class: 'nt-chip reu' }, ICON.calendar(), 'Reunión del calendario') : h('span', { class: 'nt-chip' }, 'Reunión aparte')),
+        r ? asis : null,
+        lineasBox,
+        pie),
+      ntEstadoLinea());
+    pintar();
+    pintarAsis();
+    if (foco === 'titulo') titulo.focus();
+    else if (foco === 'linea') enfocar(n.lineas[n.lineas.length - 1].id);
+    else requestAnimationFrame(() => lineasBox.querySelectorAll('textarea').forEach(autoalto));
+  }
+
+  // Las líneas de una nota cambian de alto si cambia el ancho (girar el iPad, redimensionar la ventana)
+  window.addEventListener('resize', () => { document.querySelectorAll('.nt-texto').forEach(ta => { ta.style.height = 'auto'; ta.style.height = ta.scrollHeight + 'px'; }); });
+
   // ---------- menú lateral ----------
   function toggleSidebar(show) {
     const app = document.getElementById('app');
@@ -6137,6 +6713,11 @@
       }
       // Planner: si la sesión del trabajo caducó, este clic lleva a reconectar
       if (plConnected()) { if (S.plState === 'login') plConnect(); else trabajos.push(plSync({ notify: v === 'trabajo', manual: true })); }
+      // Notas de reuniones (OneDrive del trabajo): si falta permiso o caducó la sesión, este clic lleva a darlo
+      if (plConnected() && (ntEnUso() || v === 'notas') && S.plState !== 'login') {
+        if (S.ntState === 'login' || S.ntState === 'permiso') ntConectar('sync');
+        else trabajos.push(ntSync({ notify: v === 'notas', manual: true }));
+      }
       trabajos.push(todoistP);
       // Una sola entrada de auditoría con el resultado de cada fuente (se registra siempre, aunque no haya cambios)
       Promise.all(trabajos.map(p => p.catch(() => null))).then(rs => {

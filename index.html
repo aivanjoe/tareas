@@ -8,8 +8,8 @@
        Si se bloquea algo legítimo, la app lo avisa y lo apunta en la Auditoría (ver CLAUDE.md). -->
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self' https://api.todoist.com https://graph.microsoft.com https://login.microsoftonline.com https://*.1drv.com https://*.onedrive.com https://*.microsoftpersonalcontent.com https://*.sharepoint.com https://*.livefilestore.com https://www.googleapis.com https://people.googleapis.com https://oauth2.googleapis.com https://*.local:*; frame-src https://*.local:* https://login.microsoftonline.com https://login.live.com; worker-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'none'">
   <title>Visir</title>
-  <link rel="icon" type="image/svg+xml" href="favicon.svg?v=83">
-  <link rel="apple-touch-icon" href="apple-touch-icon.png?v=83">
+  <link rel="icon" type="image/svg+xml" href="favicon.svg?v=84">
+  <link rel="apple-touch-icon" href="apple-touch-icon.png?v=84">
   <!-- Al añadirla a la pantalla de inicio del iPhone/iPad: se abre como app, con este nombre -->
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="mobile-web-app-capable" content="yes">
@@ -18,7 +18,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="styles.css?v=83">
+  <link rel="stylesheet" href="styles.css?v=84">
 </head>
 <body>
   <div class="app" id="app">
@@ -39,6 +39,10 @@
         <a href="#" class="nav-item" data-view="trabajo">
           <svg viewBox="0 0 24 24"><rect x="3" y="7" width="18" height="13" rx="2"/><path d="M8 7V5a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
           <span class="nav-label">Trabajo</span>
+        </a>
+        <a href="#" class="nav-item" data-view="notas">
+          <svg viewBox="0 0 24 24"><path d="M6 3h10l3 3v15H6z"/><path d="M9 9h7M9 13h7M9 17h4"/><path d="M4 7h3M4 12h3M4 17h3"/></svg>
+          <span class="nav-label">Notas</span>
         </a>
         <a href="#" class="nav-item" data-view="compra">
           <svg viewBox="0 0 24 24"><path d="M3 4h2l2.2 10.2a2 2 0 0 0 2 1.6h7.6a2 2 0 0 0 2-1.5L20.5 8H6.2"/><circle cx="10" cy="20" r="1.4"/><circle cx="17" cy="20" r="1.4"/></svg>
@@ -125,6 +129,7 @@
       </div>
 
       <section class="view" id="viewContactos" aria-label="Contactos" hidden></section>
+      <section class="view" id="viewNotas" aria-label="Notas" hidden></section>
       <section class="view" id="viewCompra" aria-label="Compra" hidden></section>
       <section class="view" id="viewCalendario" aria-label="Calendario" hidden></section>
       <section class="view" id="viewGastos" aria-label="Gastos" hidden></section>
@@ -141,6 +146,6 @@
   <div class="toasts" id="toasts" aria-live="polite"></div>
 
   <script src="Sortable.min.js"></script>
-  <script src="app.js?v=83"></script>
+  <script src="app.js?v=84"></script>
 </body>
 </html>
